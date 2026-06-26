@@ -1,0 +1,24 @@
+# Local reverse-engineering artifacts.
+# These include APKs, decompiled source, native libraries, and extracted assets.
+artifacts/
+
+# Android packages and native binaries must not be pushed.
+*.apk
+*.apks
+*.xapk
+*.so
+*.dex
+*.odex
+*.vdex
+
+# Common decompiler outputs.
+jadx/
+apktool/
+out/
+*.class
+
+# Local OS/editor noise.
+.DS_Store
+*.swp
+*.swo
+
