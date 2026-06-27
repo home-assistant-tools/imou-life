@@ -23,8 +23,8 @@ RUN set -eux; \
         "https://github.com/AlexxIT/go2rtc/releases/download/v${GO2RTC_VERSION}/go2rtc_linux_${A}"; \
     chmod 0755 /opt/go2rtc
 
-COPY supervisor.py login_site.py /opt/imou-p2p-bridge/
-RUN chmod 0755 /opt/imou-p2p-bridge/supervisor.py /opt/imou-p2p-bridge/login_site.py
+COPY supervisor.py login_site.py mqtt_bridge.py dvrip.py /opt/imou-p2p-bridge/
+RUN chmod 0755 /opt/imou-p2p-bridge/*.py
 
 ENV IMOU_BRIDGE_OPTIONS=/data/options.json
 CMD ["python3", "/opt/imou-p2p-bridge/supervisor.py"]

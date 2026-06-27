@@ -72,7 +72,9 @@ class Camera:
     serial: str = ""
     host: str = ""
     relay: bool = False
-    tunnel_port: int = 0  # assigned for p2p cameras
+    ptz: bool = False
+    tunnel_port: int = 0  # assigned for p2p cameras (stream, ->554)
+    ptz_port: int = 0     # assigned for p2p ptz cameras (DVRIP, ->37777)
 
     def realmonitor_path(self) -> str:
         return f"/cam/realmonitor?channel={self.channel}&subtype={self.subtype}"
@@ -109,10 +111,14 @@ def parse_cameras(options: dict[str, Any], base_port: int) -> list[Camera]:
             serial=str(raw.get("serial", "")),
             host=str(raw.get("host", "")),
             relay=bool(raw.get("relay", False)),
+            ptz=bool(raw.get("ptz", False)),
         )
         if mode == "p2p":
             cam.tunnel_port = next_port
             next_port += 1
+            if cam.ptz:
+                cam.ptz_port = next_port  # second tunnel -> 37777 for DVRIP/PTZ
+                next_port += 1
         cams.append(cam)
     return cams
 
@@ -282,7 +288,7 @@ def main() -> int:
         raise SystemExit("Configure at least one camera")
     write_go2rtc_config(cameras, go2rtc_opts, log_level)
 
-    mqtt = Mqtt(MqttConfig.from_options(options))
+    mqtt_cfg = options.get("mqtt", {})
     stop = threading.Event()
     workers: list[Proc] = []
 
@@ -307,13 +313,24 @@ def main() -> int:
             def handler(line: str) -> None:
                 if "Ready to connect!" in line:
                     log(f"[{c.name}] tunnel ready on 127.0.0.1:{c.tunnel_port}")
-                    mqtt.publish(mqtt.state_topic(c.slug), "online", retain=True)
             return handler
 
         w = Proc(f"tunnel:{cam.name}", cmd, stop=stop, restart_seconds=restart_seconds,
                  verbose=verbose, on_line=make_handler(cam))
         w.start()
         workers.append(w)
+
+    # extra dh-p2p tunnels to :37777 for PTZ (DVRIP) on p2p PTZ cameras
+    for cam in cameras:
+        if cam.mode == "p2p" and cam.ptz and cam.ptz_port:
+            cmd = [binary, "-p", f"127.0.0.1:{cam.ptz_port}:37777"]
+            if cam.relay:
+                cmd.append("--relay")
+            cmd.append(cam.serial)
+            w = Proc(f"ptz-tunnel:{cam.name}", cmd, stop=stop,
+                     restart_seconds=restart_seconds, verbose=verbose)
+            w.start()
+            workers.append(w)
 
     # go2rtc (consumes sources, restreams)
     go2rtc = Proc("go2rtc", [GO2RTC_BIN, "-config", str(GO2RTC_CONFIG)],
@@ -333,8 +350,31 @@ def main() -> int:
         log(f"[discovery-ui] login/serial helper on ingress port {site_port}")
 
     for cam in cameras:
-        mqtt.announce(cam, rtsp_port)
         log(f"[{cam.name}] restream: rtsp://<addon-host>:{rtsp_port}/{cam.slug}")
+
+    # local MQTT: HA discovery + state + PTZ/TTS commands
+    if bool(mqtt_cfg.get("enabled", False)):
+        try:
+            from mqtt_bridge import MqttBridge
+        except Exception as exc:
+            log(f"[mqtt] cannot import bridge: {exc}")
+            MqttBridge = None
+        if MqttBridge:
+            cam_dicts = [{"slug": c.slug, "name": c.name, "mode": c.mode, "ptz": c.ptz} for c in cameras]
+            ptz_eps = {}
+            for c in cameras:
+                if not c.ptz:
+                    continue
+                if c.mode == "lan":
+                    ptz_eps[c.slug] = (c.host, 37777, c.username, c.password)
+                elif c.ptz_port:
+                    ptz_eps[c.slug] = ("127.0.0.1", c.ptz_port, c.username, c.password)
+            adv = str(options.get("advertised_host", "<nas>"))
+            bridge_th = MqttBridge(mqtt_cfg, cam_dicts, rtsp_port, stop, ptz_eps,
+                                   advertised_host=adv)
+            bridge_th.start()
+            log(f"[mqtt] bridge started -> {mqtt_cfg.get('host')}:{mqtt_cfg.get('port', 1883)} "
+                f"(ptz cams: {list(ptz_eps)})")
 
     while not stop.is_set():
         if not any(w.is_alive() for w in workers):
