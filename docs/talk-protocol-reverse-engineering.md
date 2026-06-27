@@ -38,6 +38,69 @@ The pure-protocol path below (a standalone DHHTTP-media client over dh-p2p) is s
 documented for an app-free implementation, but the encoder-injection method above is
 the working solution today.
 
+## App-free talk protocol (`visualtalk.xav` over the P2P realm) — captured
+
+Captured by hooking libc `sendto`/`recvfrom` on the patched app (the app writes clean
+DHHTTP to the realm fd with normal libc calls — only the UDP/PTCP layer below uses
+inline `svc`). This is the exact sequence to reproduce over a `dh-p2p` realm tunnel.
+
+The talk endpoint is **`/live/visualtalk.xav`** (not `/videotalk`, not `talk.xav`).
+It is RTSP-like over the realm: a single keep-alive connection, incrementing `Cseq`.
+
+```
+# Cseq 0 — open session (SDP offer + auth)
+PLAY /live/visualtalk.xav?channel=1&subtype=0&encrypt=3&imagesize=18&audioType=1&trackID=31&method=0 HTTP/1.1
+Accpet-Sdp: Private                         (sic: misspelled by the app)
+Authorization: WSSE profile="UsernameToken"
+Connect-Type: P2P
+Connection: keep-alive
+Cseq: 0
+Host: 127.0.0.1:<realm-port>
+Private-Length: 717                          (client SDP offer body follows)
+Private-Type: application/sdp
+Speed: 1.000000
+User-Agent: Http Stream Client/1.0
+WSSE: UsernameToken Username="admin", PasswordDigest="<b64>", LightweightDigest="<b64>"
+<blank line>
+<717-byte SDP offer>
+  -> 200 OK, Private-Type: application/sdp, Private-Length: 644, Content-Type: video/e-xav
+     <server SDP: v=0 ... m=video 0 RTP/AVP 96 a=control:trackID=.. + audio tracks>
+
+# Cseq 1 — start a track
+PLAY ...&trackID=6&method=0 HTTP/1.1 ... Cseq: 1     -> 200 OK, then media frames stream
+
+# Cseq 2 — start a track
+PLAY ...&method=2 HTTP/1.1 ... Cseq: 2               -> 200 OK + interleaved frames
+
+# Cseq 3 — START TALK
+PLAY ...&talktype=talk&trackID=64&method=0 HTTP/1.1 ... Cseq: 3   -> 200 OK
+# after this 200, push talk audio frames interleaved on the realm:
+#   "$" + channel + length(4 BE) + DHAV(AAC) frame
+```
+
+Notes / remaining unknowns for a standalone client:
+- **Transport:** `dh-p2p -p 127.0.0.1:<p>:8086 <SERIAL>` gives the realm pipe; the AEDA
+  HTTP server (port 8086 over the realm) serves `visualtalk.xav`. The P2P signaling
+  (`NFPOST /device/<SERIAL>/{local,p2p}-channel` with WSSE `P2PClient`/`LeChange...`)
+  is handled by dh-p2p, not by us.
+- **Auth (TODO RE):** Cseq 0 needs WSSE `Username="admin"` with `PasswordDigest` +
+  `LightweightDigest` derived from the camera password (admin) + a nonce/created. The
+  digest algorithm still needs reversing (standard WSSE is
+  `Base64(SHA1(nonce+created+pw))`; Dahua adds a LightweightDigest — verify offline
+  against a captured (nonce, created, digest) triple).
+- **Encryption (TODO):** the app uses `encrypt=3` (DHEncrypt3) — the on-realm media
+  payloads are encrypted (recv frames are high-entropy with no ADTS). For an app-free
+  client either (a) try `encrypt=0` in the PLAY URL for a plaintext session, or
+  (b) reverse `CDHEncrypt3` (Src/StreamSource/DHEncrypt3.cpp). NOTE the *send* path in
+  the running app appeared unencrypted in earlier tests; confirm whether `encrypt=3`
+  applies to the talk-send frames or only the recv/video.
+- **Frame format:** the 28-byte DHAV header (above), AAC payload @ 16 kHz, trackID=5
+  on the wire (interleave channel `0x0a` = 2×5).
+
+Building this standalone client (dh-p2p realm + visualtalk state machine + WSSE auth +
+encryption handling) is the remaining work for an app-free TTS path. The
+encoder-injection method (top of file) already delivers working TTS today.
+
 ### Encryption finding (good news for app-free): the talk SEND is plaintext
 
 Investigating `CDHEncrypt3` (Src/StreamSource/DHEncrypt3.cpp, typeinfo
