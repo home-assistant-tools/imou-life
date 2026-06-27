@@ -56,6 +56,32 @@ class PtzSession:
         self.cli = None
         self.obj = None
 
+    def move(self, code: str, speed: int = 4, run: bool = True):
+        """Continuous start (run=True) / stop (run=False) for a direction code."""
+        with self.lock:
+            for _ in (1, 2):
+                try:
+                    self._ensure()
+                    m = "ptz.start" if run else "ptz.stop"
+                    self.cli.rpc(m, {"code": code, "arg1": 0, "arg2": int(speed), "arg3": 0},
+                                 extra={"object": self.obj})
+                    return True
+                except Exception as e:
+                    log(f"[ptz] {self.host}:{self.port} {m} {code} err: {e}")
+                    self._reset()
+            return False
+
+    def stop_all(self):
+        with self.lock:
+            try:
+                self._ensure()
+                for c in ("Left", "Right", "Up", "Down", "ZoomTele", "ZoomWide"):
+                    self.cli.rpc("ptz.stop", {"code": c, "arg1": 0, "arg2": 0, "arg3": 0},
+                                 extra={"object": self.obj})
+            except Exception as e:
+                log(f"[ptz] stop_all err: {e}")
+                self._reset()
+
     def command(self, code: str):
         with self.lock:
             for attempt in (1, 2):

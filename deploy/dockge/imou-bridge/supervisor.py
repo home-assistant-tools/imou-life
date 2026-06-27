@@ -75,6 +75,7 @@ class Camera:
     ptz: bool = False
     tunnel_port: int = 0  # assigned for p2p cameras (stream, ->554)
     ptz_port: int = 0     # assigned for p2p ptz cameras (DVRIP, ->37777)
+    onvif_port: int = 0   # assigned for ptz cameras (ONVIF shim for Frigate)
 
     def realmonitor_path(self) -> str:
         return f"/cam/realmonitor?channel={self.channel}&subtype={self.subtype}"
@@ -352,6 +353,34 @@ def main() -> int:
     for cam in cameras:
         log(f"[{cam.name}] restream: rtsp://<addon-host>:{rtsp_port}/{cam.slug}")
 
+    adv = str(options.get("advertised_host", "<nas>"))
+
+    # PTZ DVRIP endpoints (LAN direct :37777 or p2p tunnel) for MQTT + ONVIF shim
+    ptz_eps = {}
+    for c in cameras:
+        if not c.ptz:
+            continue
+        if c.mode == "lan":
+            ptz_eps[c.slug] = (c.host, 37777, c.username, c.password)
+        elif c.ptz_port:
+            ptz_eps[c.slug] = ("127.0.0.1", c.ptz_port, c.username, c.password)
+
+    # ONVIF PTZ shim per PTZ camera -> Frigate can drive PTZ via onvif
+    onvif_base = int(options.get("onvif_base_port", 8700))
+    for i, c in enumerate(cameras):
+        if not c.ptz or c.slug not in ptz_eps:
+            continue
+        h, p, u, pw = ptz_eps[c.slug]
+        oport = onvif_base + i
+        c.onvif_port = oport
+        w = Proc(f"onvif:{c.name}", ["python3", "/opt/imou-p2p-bridge/onvif_ptz_shim.py"],
+                 stop=stop, restart_seconds=restart_seconds, verbose=verbose,
+                 env={"ONVIF_PORT": str(oport), "ADVERTISED_HOST": adv,
+                      "DVRIP_HOST": h, "DVRIP_PORT": str(p), "DVRIP_USER": u, "DVRIP_PASS": pw})
+        w.start()
+        workers.append(w)
+        log(f"[onvif:{c.name}] ONVIF PTZ shim on :{oport} (Frigate onvif host:{adv} port:{oport})")
+
     # local MQTT: HA discovery + state + PTZ/TTS commands
     if bool(mqtt_cfg.get("enabled", False)):
         try:
@@ -361,15 +390,6 @@ def main() -> int:
             MqttBridge = None
         if MqttBridge:
             cam_dicts = [{"slug": c.slug, "name": c.name, "mode": c.mode, "ptz": c.ptz} for c in cameras]
-            ptz_eps = {}
-            for c in cameras:
-                if not c.ptz:
-                    continue
-                if c.mode == "lan":
-                    ptz_eps[c.slug] = (c.host, 37777, c.username, c.password)
-                elif c.ptz_port:
-                    ptz_eps[c.slug] = ("127.0.0.1", c.ptz_port, c.username, c.password)
-            adv = str(options.get("advertised_host", "<nas>"))
             api_port = int(go2rtc_opts.get("api_port", 1984))
             snap_iv = int(options.get("snapshot_interval", 5))
             bridge_th = MqttBridge(mqtt_cfg, cam_dicts, rtsp_port, stop, ptz_eps,
