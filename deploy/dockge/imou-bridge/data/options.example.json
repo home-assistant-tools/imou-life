@@ -1,0 +1,11 @@
+{
+  "log_level": "info",
+  "discovery_ui": true,
+  "go2rtc": { "rtsp_port": 8554, "api_port": 1984, "webrtc_port": 8555 },
+  "bridge": { "binary": "/opt/dh-p2p/dh-p2p", "restart_seconds": 5, "base_port": 8600, "verbose": false },
+  "cameras": [
+    { "name": "cam san", "mode": "p2p", "serial": "EXAMPLESERIAL01", "username": "admin", "password": "CHANGEME", "channel": 1, "subtype": 0, "relay": false },
+    { "name": "lan 20", "mode": "lan", "host": "192.168.2.20", "username": "admin", "password": "CHANGEME", "channel": 1, "subtype": 0 }
+  ],
+  "mqtt": { "enabled": false, "host": "core-mosquitto", "port": 1883, "username": "", "password": "", "topic_prefix": "imou_p2p", "discovery": true, "discovery_prefix": "homeassistant" }
+}

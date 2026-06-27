@@ -1,0 +1,14 @@
+services:
+  imou-bridge:
+    build: .
+    container_name: imou-bridge
+    # host networking: go2rtc WebRTC (UDP) + dh-p2p P2P (ephemeral UDP) need it.
+    network_mode: host
+    restart: unless-stopped
+    volumes:
+      - ./data:/data
+    # ports exposed on the host (network_mode: host):
+    #   8554 go2rtc RTSP restream   -> rtsp://<nas>:8554/<name>  (Frigate / Generic Camera)
+    #   1984 go2rtc web UI/API      -> http://<nas>:1984
+    #   8555 go2rtc WebRTC (tcp/udp)
+    #   8099 device discovery UI    -> http://<nas>:8099  (login -> serials)

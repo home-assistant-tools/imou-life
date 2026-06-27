@@ -16,9 +16,13 @@ jadx/
 apktool/
 out/
 *.class
+__pycache__/
+*.pyc
 
 # Local OS/editor noise.
 .DS_Store
 *.swp
 *.swo
 
+# Deploy configs with real credentials
+deploy/**/data/options.json

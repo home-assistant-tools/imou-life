@@ -62,6 +62,15 @@ cameras:
 If the camera exposes LAN RTSP or ONVIF directly, use that first. It is simpler,
 more reliable, and avoids cloud/P2P dependencies.
 
+Confirmed LAN RTSP shape:
+
+```text
+rtsp://<user>:<password>@<camera-ip>:554/cam/realmonitor?channel=1&subtype=0
+```
+
+Use `subtype=1` for the lower-resolution sub stream. See
+`docs/rtsp-access.md` for the current probe results and helper script.
+
 ### 2. Wrap Imou Native SDK Behavior
 
 Run a local process that uses or recreates the native flow:
@@ -77,7 +86,28 @@ publish local RTSP endpoint
 
 This is likely the fastest route to a working bridge.
 
-### 3. Reimplement the Protocol
+### 3. Reuse the Public Dahua P2P/PTCP Work
+
+The public `dh-p2p` project has enough Dahua P2P/PTCP support to open a relay
+tunnel and forward camera RTSP for the tested remote camera:
+
+```text
+https://github.com/khoanguyen-3fc/dh-p2p
+```
+
+The local bridge shape becomes:
+
+```text
+dh-p2p tunnel
+  -> 127.0.0.1:1554
+  -> rtsp://127.0.0.1:1554/cam/realmonitor?channel=1&subtype=0
+  -> go2rtc / Frigate
+```
+
+This is now the preferred phase-2 path for read-only live streams. See
+`docs/phase2-local-p2p-bridge.md`.
+
+### 4. Reimplement the Protocol
 
 Fully reimplementing Imou Life P2P would require:
 
@@ -93,8 +123,9 @@ This is the most portable route, but also the most work.
 
 ## Important Caveat
 
-Dahua DHP2P public research is useful background, but Imou Life 10.x includes
-Imou-specific app/cloud data such as `p2p-v2`, `p2pAk`, `p2pSk` or token,
-`Private3`, `LoginCFS`, MTS, QUIC, and `visualtalk.xav`. Do not assume an older
-Dahua-only proof of concept works unmodified.
-
+Dahua DHP2P public research is more than background for read-only RTSP: the
+tested remote camera works through the public PTCP tunnel. Imou Life 10.x still
+includes Imou-specific app/cloud data such as `p2p-v2`, `p2pAk`, `p2pSk` or
+token, `Private3`, `LoginCFS`, MTS, QUIC, and `visualtalk.xav`, so those paths
+may still matter for other models, encrypted streams, talkback, playback, or
+future firmware.

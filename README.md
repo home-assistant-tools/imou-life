@@ -32,6 +32,7 @@ decompiled vendor code.
 - [Research Summary](docs/research-summary.md)
 - [Cloud API Surface](docs/cloud-api-surface.md)
 - [P2P and Media Flow](docs/p2p-media-flow.md)
+- [Phase 2 Local P2P Bridge](docs/phase2-local-p2p-bridge.md)
 - [Two-Way Audio](docs/two-way-audio.md)
 - [Frigate and go2rtc Bridge Notes](docs/frigate-go2rtc-bridge.md)
 - [Next Steps](docs/next-steps.md)
@@ -41,4 +42,3 @@ decompiled vendor code.
 This project is for interoperability research with devices you own or are
 authorized to test. Avoid publishing secrets, account tokens, device serials,
 APK binaries, vendor code, or captured private traffic.
-
