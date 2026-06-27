@@ -370,8 +370,11 @@ def main() -> int:
                 elif c.ptz_port:
                     ptz_eps[c.slug] = ("127.0.0.1", c.ptz_port, c.username, c.password)
             adv = str(options.get("advertised_host", "<nas>"))
+            api_port = int(go2rtc_opts.get("api_port", 1984))
+            snap_iv = int(options.get("snapshot_interval", 5))
             bridge_th = MqttBridge(mqtt_cfg, cam_dicts, rtsp_port, stop, ptz_eps,
-                                   advertised_host=adv)
+                                   advertised_host=adv, api_port=api_port,
+                                   snapshot_interval=snap_iv)
             bridge_th.start()
             log(f"[mqtt] bridge started -> {mqtt_cfg.get('host')}:{mqtt_cfg.get('port', 1883)} "
                 f"(ptz cams: {list(ptz_eps)})")

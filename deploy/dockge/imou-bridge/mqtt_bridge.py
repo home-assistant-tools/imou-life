@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import threading
 import time
+from urllib import request
 
 import dvrip
 
@@ -84,12 +85,15 @@ class PtzSession:
 
 class MqttBridge(threading.Thread):
     def __init__(self, mqtt_cfg: dict, cameras: list, rtsp_port: int, stop: threading.Event,
-                 ptz_endpoints: dict, tts_cb=None, advertised_host: str = "<nas>"):
+                 ptz_endpoints: dict, tts_cb=None, advertised_host: str = "<nas>",
+                 api_port: int = 1984, snapshot_interval: int = 5):
         super().__init__(daemon=True)
         self.cfg = mqtt_cfg
         self.cameras = cameras           # list of dicts: {slug,name,mode,ptz,...}
         self.rtsp_port = rtsp_port
         self.host_ip = advertised_host
+        self.api_port = api_port
+        self.snapshot_interval = snapshot_interval
         self.stop = stop
         self.tts_cb = tts_cb
         self.disc = str(mqtt_cfg.get("discovery_prefix", "homeassistant")).strip("/")
@@ -124,9 +128,28 @@ class MqttBridge(threading.Thread):
                 self.stop.wait(5)
         c.loop_start()
         c.publish(f"{self.base}/bridge/state", "online", retain=True)
+        snap = threading.Thread(target=self._snapshot_loop, daemon=True)
+        snap.start()
         while not self.stop.is_set():
             self.stop.wait(1)
         c.loop_stop()
+
+    def _snapshot_loop(self):
+        """Periodically fetch a JPEG from go2rtc and publish it (MQTT camera)."""
+        while not self.stop.is_set():
+            for cam in self.cameras:
+                slug = cam["slug"]
+                url = f"http://127.0.0.1:{self.api_port}/api/frame.jpeg?src={slug}"
+                try:
+                    with request.urlopen(url, timeout=12) as r:
+                        img = r.read()
+                    if img and self.client:
+                        self.client.publish(self.t(slug, "snapshot"), img, retain=True)
+                except Exception as e:
+                    log(f"[snap] {slug}: {e}")
+                if self.stop.is_set():
+                    return
+            self.stop.wait(max(1, self.snapshot_interval))
 
     def _on_connect(self, client, _u, _f, rc):
         log(f"[mqtt] connected rc={rc}")
@@ -152,6 +175,12 @@ class MqttBridge(threading.Thread):
             "state_topic": self.t(slug, "rtsp_url"), "icon": "mdi:cctv"})
         client.publish(self.t(slug, "rtsp_url"),
                        f"rtsp://{self.host_ip}:{self.rtsp_port}/{slug}", retain=True)
+
+        # MQTT camera = refreshing JPEG snapshot (viewable in HA via MQTT).
+        # For smooth live video use the RTSP URL above (Generic Camera / go2rtc).
+        cfg("camera", f"{slug}_cam", {
+            "name": name, "unique_id": f"imou_{slug}_cam",
+            "topic": self.t(slug, "snapshot")})
 
         if cam.get("ptz"):
             buttons = [("left", "Left", "mdi:arrow-left"), ("right", "Right", "mdi:arrow-right"),
