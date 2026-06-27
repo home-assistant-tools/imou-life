@@ -34,6 +34,7 @@ decompiled vendor code.
 - [P2P and Media Flow](docs/p2p-media-flow.md)
 - [Phase 2 Local P2P Bridge](docs/phase2-local-p2p-bridge.md)
 - [Two-Way Audio](docs/two-way-audio.md)
+- [Talk Protocol — Binary-Level Reverse Engineering](docs/talk-protocol-reverse-engineering.md)
 - [Frigate and go2rtc Bridge Notes](docs/frigate-go2rtc-bridge.md)
 - [Next Steps](docs/next-steps.md)
 

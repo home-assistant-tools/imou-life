@@ -83,34 +83,39 @@ Only after live video works reliably should talkback be attempted.
 
 ## Talkback Prototype
 
-See `two-way-audio.md` for the full reversed flow. Key correction from the
-research: **audio is captured inside the native `.so` (`startSampleAudio`), not
-pushed from Java** — so `pushMediaData` is the *video* path. For our own audio we
-must replicate the device-side `talk.xav` protocol over the loopback P2P port,
-not call `pushMediaData`.
+**✅ WORKING (encoder-injection):** TTS now plays on a real camera. Hook the patched
+app's AAC encoder input (`LCAACAudioEncoder::Encode`, libCommonSDK.so vtable[3] @
+patched `0x995240`) and replace the mic PCM (mono s16le 16 kHz) with our clip — the
+app does AAC + handshake + DHEncrypt3 + P2P itself. Tool: `scripts/imou_tts_inject.py`
+(`--text "..."`), then toggle the app talk button ON. Details:
+[`talk-protocol-reverse-engineering.md`](talk-protocol-reverse-engineering.md).
 
-Target shape (mirror `scripts/imou_xav_bridge.py`, talk direction):
+The notes below remain for the *app-free* pure-protocol path (a standalone
+DHHTTP-media client over dh-p2p), which is still future work.
 
-```text
-HA/go2rtc mic (G.711a 8kHz 16-bit)
-  -> talk.xav over 127.0.0.1:<port>  (Digest auth, DHAV pack, proto=Private3)
-  -> camera speaker
-```
+**Status (binary-level RE complete):** see
+[`talk-protocol-reverse-engineering.md`](talk-protocol-reverse-engineering.md) for the
+authoritative writeup (frame format, full send pipeline with offsets, transport,
+state machine). `two-way-audio.md` is the earlier app-decompile pass.
 
-Ordered tasks:
+Settled facts (superseding earlier guesses in this file):
 
-1. **Capture a real talk session** (highest priority — blocks everything else):
-   tap the talk button in Imou Life while running tcpdump on the loopback proxy
-   port. Record: HTTP method, headers, duplex GET vs POST/upload, and the
-   outbound (app -> device) DHAV audio frame layout/sequencing.
-2. Confirm talk URL params from device abilities (`talkType`, `audioType`,
-   `subtype`, `TSV1/TSV2/RTSV1/TCM`).
-3. Confirm Digest auth for `talk.xav` matches the receive bridge (same realm/
-   nonce flow, RTSP password).
-4. Prefer an `encrypt=0` device first; otherwise reproduce PSK = MD5(devicePwd)
-   stream encryption for `encryptMode in {2,3,4}`.
-5. Build a one-way inject prototype (host audio -> camera speaker), then add
-   echo-cancellation handling.
+- **Frame format is SOLVED** (`LCDHAVAudioPacker::Pack`, verified against live frames):
+  28-byte DHAV header + raw G.711 payload + 8-byte `dhav` trailer. Sample-rate code at
+  header `[0x1B]`; the **app talks at 16 kHz** G.711 (`code 4`), not 8 kHz.
+- **Talk is NOT a standalone connection.** It is `http_client_put_frame`'d as
+  **trackID=5** into the *same* P2P live-view stream session (`DHHTTPTalker`,
+  share-link). Wire framing `$` + `ch 0x0a` (= 2×trackID5) + `len(4 BE)` + DHAV.
+- **Local direct talk is blocked:** `talk.xav` (8086) is half-duplex; `/videotalk`
+  (8086) `500`s because it needs the P2P session context (fails even over a naive
+  dh-p2p→8086 pipe). RTSP 554 has no `sendonly` track on Imou firmware.
 
-Codec confirmed by the talk path: **G.711a (encodeType 14), 8000 Hz, 16-bit,
-DHAV packaging (packType 0)**.
+Remaining work (implementation, not discovery):
+
+1. Frida-hook `CTransformatDHInterleave` during a real talk to dump the exact
+   `HTTPDH_START_TALK` handshake + interleaved talk bytes (the final UDP write is
+   inline-`svc`, so hook here, above PTCP).
+2. Build a DHHTTP-media client over the dh-p2p tunnel: open the live session, replay
+   the talk-enable handshake, then inject 16 kHz G.711 DHAV as `$`+ch0x0a+len4BE.
+3. Test on a P2P-reachable indoor account camera with a working speaker (e.g.
+   "Kiara-Phòng khách"), someone nearby to listen.
