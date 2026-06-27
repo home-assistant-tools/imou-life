@@ -38,6 +38,26 @@ The pure-protocol path below (a standalone DHHTTP-media client over dh-p2p) is s
 documented for an app-free implementation, but the encoder-injection method above is
 the working solution today.
 
+### Encryption finding (good news for app-free): the talk SEND is plaintext
+
+Investigating `CDHEncrypt3` (Src/StreamSource/DHEncrypt3.cpp, typeinfo
+`N5Basic9StreamApp11CDHEncrypt3E`, vtable @ patched `0x10dcb40`) showed that during a
+talk session **only `vt[10]` (the "decode" path, @ `0x78e8e0`) fires** — that is the
+*receive* direction (decrypting the camera's own mic audio coming back). **No encrypt
+method fires on the SEND path.** Corroborating evidence that talk send is unencrypted:
+
+- A real captured wire talk frame (gateway-MITM, UDP/PTCP payload) has byte-entropy
+  **~4.7** and contains readable ASCII — encrypted data would be ~7.99.
+- The recv AAC frame entropy is ~7.0; that earlier-suspected "encryption" is just
+  **AAC's natural entropy**, not a cipher.
+- At `Pack` the payload is already cleartext AAC (`ff f1` ADTS) and nothing encrypts
+  it before the wire.
+
+**Implication:** an app-free talk client needs **no crypto** — only the protocol:
+dh-p2p realm + DHHTTP-media client + `HTTPDH_START_TALK` handshake + plaintext AAC
+DHAV frames (trackID=5, `$`+ch`0x0a`+len(4 BE)). (Receiving/decrypting the camera's
+returned mic audio would need `CDHEncrypt3`, but that is not required for TTS.)
+
 ---
 
 ## 1. The DHAV talk frame format (SOLVED)
