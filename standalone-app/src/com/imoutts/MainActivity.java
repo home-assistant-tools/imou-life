@@ -59,7 +59,11 @@ public class MainActivity extends Activity {
 
         surface.getHolder().addCallback(new SurfaceHolder.Callback() {
             public void surfaceCreated(SurfaceHolder h) {
-                new Thread(() -> runTalk(h)).start();
+                new Thread(() -> {
+                    Looper.prepare();          // SDK (LCSDK_Talk) creates Handlers -> needs a Looper
+                    runTalk(h);
+                    Looper.loop();             // process the SDK's Handler messages
+                }).start();
             }
             public void surfaceChanged(SurfaceHolder h, int f, int w, int hh) {}
             public void surfaceDestroyed(SurfaceHolder h) {}
