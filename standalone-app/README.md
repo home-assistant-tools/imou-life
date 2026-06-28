@@ -46,7 +46,14 @@ DevP2PInfo`). The `DevP2PSk` is what lets the `.so` compute DevAuth — no crack
   the Imou SDK with no Imou app.
 - ✅ **NetSDK + P2P init**: `initLCNetSDK()=true`, `initP2PSeverAfterSDK()` OK, `addDevices()`
   OK, **`devState=2` (device ONLINE)** — the imported session reaches the cloud.
-- ⛔ **BLOCKER: `getNetSDKHandler()` returns 0** (fast, not a 15s timeout) → P2P device-login
+- ⛔ **ROOT CAUSE FOUND:** the SDK **delegates NetSDK device-login back to the app** via a
+  callback `LCSDK_NetsdkLogin{netSDKLoginSyn(int,String), netSDKLoginAsyn(int,String)}`
+  registered with `SetNetSDKLogin(cb)`. With no callback, `getNetSDKHandler()` returns 0
+  instantly. The callback's real impl (obfuscated app Java — no class implements it in
+  jadx) does `getP2PPort(serial)` + NetSDK `INetSDK` CLIENT_Login to 127.0.0.1:p2pport.
+  So pure .so-reuse is INSUFFICIENT for device-login — must register a Proxy callback that
+  does the NetSDK login, or capture+reimplement it (gadget on_load:wait). Deeper layer.
+- ⛔ (was) **`getNetSDKHandler()` returns 0** (fast, not a 15s timeout) → P2P device-login
   fails, so `startDHTalk` can't talk (`curStreamMode=-1`). Despite SDK init + NetSDK init +
   P2P init + addDevices + online. Missing the **exact app startup init sequence** — most
   likely `SetNetSDKLogin(callback)` and/or precise `init(...)` args. Capture it by setting
