@@ -144,6 +144,42 @@ Clean API to drive (decompiled from the app — the whole talk stack sits on the
   AUDIO is captured natively by `startSampleAudio()` (mic). So inject audio either by
   the encoder-injection hook (works) or test `pushMediaData(0, aac, …)` for audio.
 
+### Standalone APK recipe (reuse .so) — import the device session, no login/crypto
+
+The whole SDK init reduces to two calls + the talk chain. The importable "session" is
+the **`LCSDK_Login.addDevices(json)`** argument — a `List<DeviceLoginParams>`, all
+portable strings (captured live):
+
+```json
+[{ "Sn":"<serial>", "User":"admin", "Pwd":"<device-password>", "Port":8086, "Type":1,
+   "DevP2PAk":"LeChange\\v2\\Base\\phone\\easy4ipbaseapp\\<accountId>\\<p2pAk>",
+   "DevP2PSk":"<base64 P2P secret key>",
+   "DevP2PInfo":"{\"devSn\":\"<serial>\",\"p2pSalt\":\"<16hex>\",\"p2pVer\":\"6.0.x\"}",
+   "extP2PInfo":[] }]
+```
+
+This is why DevAuth resisted offline cracking with only the password — **DevAuth is
+derived from `DevP2PSk`** (an account-issued secret) + `p2pSalt` + nonce, not the
+device password. By importing `DevP2PAk`/`DevP2PSk`/`p2pSalt` (from the cloud device
+list / captured from the app), the .so computes DevAuth itself. Native handles
+(`handleKey`/`loginHandle`) are NOT importable (in-process pointers) — but these
+DeviceLoginParams ARE, and the .so opens its own P2P session from them.
+
+APK flow (own process):
+```
+LCSDK_Login.getInstance().init(p2pHost, p2pPort, ipv4, port, ipv6, terminalId, bool) // SDK+P2P init
+LCSDK_Login.getInstance().addDevices(<DeviceLoginParams json above>)                 // import session
+// open a stream to get a handleKey (needs a Surface):
+LCSDK_PlayWindow(...).playRealTimeStream(serial, channel, encryptMode, ... )         // .so does P2P/DevAuth
+LCSDK_Talk.INSTANCE.startTalkByHandleKey(handleKey, ...)                             // talk
+// inject TTS: hook LCAACAudioEncoder::Encode (0x995240) OR pushMediaData(type=audio)
+```
+Remaining for the build: capture `init(...)` args (P2P server host/port — fires at
+startup; gadget is `on_load:resume` so set `wait`/autoload to capture, or read app
+config); set up an Android build (apktool repackage, or gradle+SDK) bundling
+`libCommonSDK.so`(+deps) and the SDK classes; provide a hidden `Surface` for play.
+DeviceLoginParams come from the cloud device-list + p2p-info APIs (see login-api.md).
+
 Recommended: **flavor 1** — Frida-call `LCSDK_Talk.INSTANCE.startDHTalk(<serial>, 0,
 false, true)` on the running (logged-in) app to start talk with no UI tap, then inject
 TTS at the encoder → fully scriptable today, reusing the entire .so stack (no DevAuth
