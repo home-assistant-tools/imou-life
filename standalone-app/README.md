@@ -10,7 +10,7 @@ for the full reverse-engineering and the recipe this implements.
 
 ## How it works
 1. Bundles `libCommonSDK.so` (+ deps `libCommonLog/libnetsdk/libjninetsdk/libCloudClient/
-   libc++_shared`) and the Imou app's `classes*.dex` (the obfuscated SDK classes).
+   libLCSign/libc++_shared`) and the Imou app's `classes*.dex` (the obfuscated SDK classes).
 2. `MainActivity` (reflection) runs: `LCSDK_Login.init(easy4ipcloud:8800,…)` →
    `addDevices(DEVICE_JSON)` → `LCSDK_PlayWindow.playRealTimeStream(serial,…)` on a hidden
    `SurfaceView` → `LCSDK_Talk.INSTANCE.startTalkByHandleKey(handleKey,…)`.
@@ -26,12 +26,12 @@ adb install -r imou-tts.apk
 ```
 Stage these into `$STAGE` (large/secret — NOT in git):
 - `dex/classes*.dex` — `unzip base.apk 'classes*.dex'` from the Imou APK.
-- `jniLibs/arm64-v8a/` — the `.so` deps above + `libgadget.so` + `libgadget.config.so`
+- `jniLibs/arm64-v8a/` — the `.so` deps above + `libLCSign.so` + `libgadget.so` + `libgadget.config.so`
   (config in `"script"` mode pointing at the asset).
 - `assets/inject.js` — encoder-hook + embedded TTS (see `scripts/imou_tts_inject.py`).
 - `assets/device.json` — the captured `addDevices` payload for the target camera.
 - `assets/account.json` — cloud REST session for talk-url fetch:
-  `{"cloudHost":"app-sg1-v3.easy4ipcloud.com:443","token":"..."}`.
+  `{"cloudHost":"app-sg1-v3.easy4ipcloud.com:443","username":"uuid\\...","token":"...","sessionId":"..."}`.
 
 Do not put real serials, passwords, account tokens, `DevP2PAk`, or `DevP2PSk` in
 `MainActivity.java`. The placeholders in source are documentation only; runtime
@@ -40,7 +40,7 @@ secrets come from staged assets.
 ## Status / TODO (VALIDATED on device — S21)
 - ✅ **build mechanics** (aapt2/d8/apksigner, no gradle) — `imou-tts.apk` builds/installs.
 - ✅ **native libs load**: `libc++_shared, libCommonLog, libnetsdk, libjninetsdk,
-  libconfigsdk, libCloudClient, libCommonSDK` (the dep chain is complete).
+  libconfigsdk, libCloudClient, libCommonSDK, libLCSign` (the dep chain is complete).
 - ✅ **`LCSDK_Login.init(easy4ipcloud:8800,…)`** runs (logcat "SDK init done").
 - ✅ **`addDevices(json)`** runs (logcat "addDevices done").
 - ✅ **`LCSDK_Talk.INSTANCE`** obtained (needs `Looper.prepare()` on the worker thread —
@@ -48,6 +48,12 @@ secrets come from staged assets.
   the Imou SDK with no Imou app.
 - ✅ **NetSDK + P2P init**: `initLCNetSDK()=true`, `initP2PSeverAfterSDK()` OK, `addDevices()`
   OK, **`devState=2` (device ONLINE)** — the imported session reaches the cloud.
+- ✅ **cloud talk ticket**: ARouter + `LCSDK_RestApi` + legacy `D6.f` HTTP init now reaches
+  `things.media.GetTalkTransferStreamUrl` with real account session; cloud returns
+  `code=10000` and a `talk.rtpxav` resource. Required native signer: `libLCSign.so`.
+- ✅ **native DHHTTP talk session**: after the cloud ticket response, `AudioTalker` creates
+  a non-zero native `talkHandle` and reports native `streamMode=1`. `LCSDK_Talk.getCurStreamMode()`
+  remains `-1` for this path because the Kotlin wrapper only maps P2P/direct modes.
 - ⛔ **ROOT CAUSE FOUND:** the SDK **delegates NetSDK device-login back to the app** via a
   callback `LCSDK_NetsdkLogin{netSDKLoginSyn(int,String), netSDKLoginAsyn(int,String)}`
   registered with `SetNetSDKLogin(cb)`. With no callback, `getNetSDKHandler()` returns 0
@@ -68,11 +74,12 @@ secrets come from staged assets.
   `startTalkByHandleKey(handleKey, serial, "0", "0", "", null, "", null)`.
 - ⏳ **audio injection**: bundle `libgadget.so`+config (script mode → `assets/inject.js`,
   the encoder hook @0x995240) so the in-process gadget feeds TTS; or test
-  `pushMediaData(audioType,…)`.
+  `pushMediaData(audioType,…)` against the now-created native talk handle.
 - ⚠️ real `DEVICE_JSON` from `device_session.json` (DevP2PAk/DevP2PSk/DevP2PInfo).
-- ⚠️ current working tree experiments with ARouter/RestApi init, `getP2PPort`,
-  `tryNetSDKConnect`, and the 17-arg `LCSDK_Talk.startTalk(...)` path. It compiles,
-  but still needs on-device validation before treating the standalone APK as solved.
+- ⚠️ current working tree experiments with ARouter/RestApi init, `D6.f` legacy HTTP
+  client init, `getP2PPort`, `tryNetSDKConnect`, and the 17-arg
+  `LCSDK_Talk.startTalk(...)` path. The cloud ticket + native handle path is validated
+  on S21; audio injection still needs `libgadget.so` or a `pushMediaData(...)` path.
 
 **Milestone reached: the standalone APK runs the Imou SDK end-to-init.** Remaining =
 the play-stream (PlayerParam) wiring + the in-process TTS injection — iterative on-device.
