@@ -133,10 +133,23 @@ to hardest:
    process. The talk surface is JNI (needs a JavaVM/JNIEnv), so this still pulls in the
    Java glue; flavor 2 is strictly easier.
 
-Exported JNI entry points to drive (patched offsets): `NativeAudioTalker_createAudioTalker`
-`_startTalk`-equivalents/`_playSound`/`_enableTalkVideo`, `Encrypter_*`, plus the
-`LoginManager`/`PlayManager` JNI. Recommended: flavor 1 (fully scriptable TTS today),
-then flavor 2 if a UI-independent app is required. Reimplementing DevAuth from scratch
+Clean API to drive (decompiled from the app — the whole talk stack sits on the .so):
+- **`com.lc.lcsdk.LCSDK_Talk.INSTANCE.startDHTalk(deviceSN, channelId, isTalkWithChannel,
+  isAutoDecideParam)`** — one call; the .so does P2P + DevAuth + visualtalk + DHEncrypt3
+  internally. Also `startTalkByHandleKey(handleKey, …)`, `stopTalk()`, `playSound()`,
+  `startSampleAudio()`, `pushMediaData(int type, byte[] data, boolean softEncode)`.
+- `com.lc.common.talk.AudioTalker` → `NativeAudioTalker.createAudioTalker(
+  talkerParam.toJsonString())` returns the handle; `pushMediaData(handle, type, bytes,
+  len, soft)`. **`type=1` is VIDEO** (the visualtalk video encoder pushes type 1); talk
+  AUDIO is captured natively by `startSampleAudio()` (mic). So inject audio either by
+  the encoder-injection hook (works) or test `pushMediaData(0, aac, …)` for audio.
+
+Recommended: **flavor 1** — Frida-call `LCSDK_Talk.INSTANCE.startDHTalk(<serial>, 0,
+false, true)` on the running (logged-in) app to start talk with no UI tap, then inject
+TTS at the encoder → fully scriptable today, reusing the entire .so stack (no DevAuth
+work). **Flavor 2** — bundle `libCommonSDK.so` (+deps) and the Java classes
+(`LCSDK_Talk`, `AudioTalker`, `NativeAudioTalker`, `TalkerParam`, login/play managers)
+into a minimal APK for a UI-independent client. Reimplementing DevAuth from scratch
 (no .so) is the only genuinely hard path and is not recommended.
 
 ### Encryption finding (good news for app-free): the talk SEND is plaintext
