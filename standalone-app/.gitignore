@@ -1,0 +1,8 @@
+out/
+*.apk
+*.jks
+debug.jks
+stage/
+*.dex
+*.so
+assets/
