@@ -174,9 +174,9 @@ LCSDK_PlayWindow(...).playRealTimeStream(serial, channel, encryptMode, ... )    
 LCSDK_Talk.INSTANCE.startTalkByHandleKey(handleKey, ...)                             // talk
 // inject TTS: hook LCAACAudioEncoder::Encode (0x995240) OR pushMediaData(type=audio)
 ```
-Remaining for the build: capture `init(...)` args (P2P server host/port — fires at
-startup; gadget is `on_load:resume` so set `wait`/autoload to capture, or read app
-config); set up an Android build (apktool repackage, or gradle+SDK) bundling
+`init(...)` P2P host confirmed = **www.easy4ipcloud.com:8800** (same as dh-p2p
+MAIN_SERVER; from boot-log TLS + libCommonSDK); terminalId = a self-generated UUID.
+Remaining for the build: set up an Android build (apktool repackage, or gradle+SDK) bundling
 `libCommonSDK.so`(+deps) and the SDK classes; provide a hidden `Surface` for play.
 DeviceLoginParams come from the cloud device-list + p2p-info APIs (see login-api.md).
 
