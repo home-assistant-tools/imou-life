@@ -101,6 +101,44 @@ Building this standalone client (dh-p2p realm + visualtalk state machine + WSSE 
 encryption handling) is the remaining work for an app-free TTS path. The
 encoder-injection method (top of file) already delivers working TTS today.
 
+## Feasibility: REUSE `libCommonSDK.so` instead of reimplementing the crypto
+
+A from-scratch standalone client is blocked at **DevAuth** (the device-auth in the P2P
+`local-channel` rendezvous; `p2p-channel` 404s for account-bound devices). DevAuth is a
+Dahua-specific 32-byte SHA256 that did **not** yield to extensive offline brute-force
+(hundreds of hash/HMAC/encoding combinations) — it likely mixes a cloud-login-derived
+secret. The crypto is internal wolfSSL (no exported symbols; capstone *and* radare2
+fail to xref the SHA256/base64 tables at `0x28cadc`/`0x27d7c0`/`0x178594`). So
+reimplementing DevAuth needs Ghidra-level work and possibly the full cloud-login flow.
+
+**The pragmatic feasible path is to not reimplement any of it — reuse the .so**, which
+already does DevAuth + P2P + visualtalk + DHEncrypt3 internally. Three flavors, easiest
+to hardest:
+
+1. **Frida-driven automation (works today, reuses the whole app):** a Frida script
+   that (a) calls the app's talk JNI to open talk to a camera programmatically (no
+   manual UI tap) and (b) replaces the mic PCM at `LCAACAudioEncoder::Encode`
+   (vtable[3] @ patched `0x995240`) with our audio. This is the current working method
+   plus auto-triggering. Needs the patched app installed. (`scripts/imou_tts_inject.py`
+   already does (b); add a Java hook calling `NativeAudioTalker` start/playSound for (a).)
+
+2. **Minimal harness APK reusing the .so (truly app-free of the Imou UI):** a small APK
+   that bundles `libCommonSDK.so` (+ deps `libCloudClient/libnetsdk/...`) and the
+   handful of Java glue classes (`com.iotcom.commonsdk.talk.NativeAudioTalker`,
+   login/play managers — extract from the decompiled app), logs in with the account,
+   opens a talk session to a serial, and feeds our PCM to the encoder. Reuses ALL the
+   hard crypto/P2P from the .so; only the orchestration glue is rebuilt.
+
+3. **Native harness (`dlopen` the .so) — hardest:** drive the .so from a tiny native
+   process. The talk surface is JNI (needs a JavaVM/JNIEnv), so this still pulls in the
+   Java glue; flavor 2 is strictly easier.
+
+Exported JNI entry points to drive (patched offsets): `NativeAudioTalker_createAudioTalker`
+`_startTalk`-equivalents/`_playSound`/`_enableTalkVideo`, `Encrypter_*`, plus the
+`LoginManager`/`PlayManager` JNI. Recommended: flavor 1 (fully scriptable TTS today),
+then flavor 2 if a UI-independent app is required. Reimplementing DevAuth from scratch
+(no .so) is the only genuinely hard path and is not recommended.
+
 ### Encryption finding (good news for app-free): the talk SEND is plaintext
 
 Investigating `CDHEncrypt3` (Src/StreamSource/DHEncrypt3.cpp, typeinfo
