@@ -82,31 +82,63 @@ public class MainActivity extends Activity {
 
     void runTalk(SurfaceHolder holder) {
         try {
+            String deviceJson = readAsset("device.json");     // real session (NOT in git)
+            String serial = extract(deviceJson, "\"Sn\":\"", "\"");
+            Log.i(TAG, "serial=" + serial);
+
             // 2) SDK + P2P init
             Object login = call(cls("com.lc.lcsdk.LCSDK_Login"), null, "getInstance");
-            // init(String p2pHost,int port,String,int,String,String terminalId,boolean)
             invoke(login, "init",
                 new Class[]{String.class, int.class, String.class, int.class, String.class, String.class, boolean.class},
-                P2P_HOST, P2P_PORT, "", 0, "", "imoutts-" + System.currentTimeMillis(), false);
+                P2P_HOST, P2P_PORT, P2P_HOST, P2P_PORT, "/data/data/com.imoutts/files",
+                "imoutts-" + System.currentTimeMillis(), false);
             Log.i(TAG, "SDK init done");
+            Log.i(TAG, "initLCNetSDK=" + safe(() -> invoke(login, "initLCNetSDK", new Class[]{})));
+            try {
+                invoke(login, "initP2PSeverAfterSDK",
+                    new Class[]{String.class, int.class, String.class, int.class, String.class, String.class, boolean.class},
+                    P2P_HOST, P2P_PORT, P2P_HOST, P2P_PORT, "/data/data/com.imoutts/files", "imoutts", false);
+                Log.i(TAG, "initP2PSeverAfterSDK ok");
+            } catch (Throwable t) { Log.w(TAG, "initP2PSeverAfterSDK: " + t); }
 
             // 3) import device session
-            invoke(login, "addDevices", new Class[]{String.class}, DEVICE_JSON);
-            Log.i(TAG, "addDevices done");
+            invoke(login, "addDevices", new Class[]{String.class}, deviceJson);
+            Log.i(TAG, "addDevices done; devState=" + tryDevState(login, serial));
 
-            // 4) open real stream -> handleKey (TODO: confirm playRealTimeStream args / window class)
-            //    LCSDK_PlayWindow needs a window bound to `surface`; wiring is on-device work.
-            //    Placeholder: once a handleKey is obtained:
-            // 5) start talk
+            // 4) THE CRUX: getNetSDKHandler does the P2P device-login -> handle (talk needs this != 0)
+            //    Same json shape the SDK's startDHTalk uses (relies on the addDevices'd session).
+            String h = "{\"Sn\":\"" + serial + "\",\"Type\":0, \"Port\":0,\"User\":\"\",\"Pwd\":\"\",\"LoginType\":0}";
+            Object handle = invoke(login, "getNetSDKHandler",
+                new Class[]{String.class, int.class, boolean.class}, h, 15000, false);
+            // BLOCKER: returns 0 (fast, not a timeout) despite init+initLCNetSDK+initP2PSever+addDevices
+            // and devState=2 (online). Missing the exact app startup init — most likely
+            // SetNetSDKLogin(callback) and/or precise init() args. Capture via gadget on_load=wait.
+            Log.i(TAG, "getNetSDKHandler -> " + handle + "  (0 = P2P device-login FAILED)");
+
+            // 5) start talk via the high-level path (uses getNetSDKHandler internally)
             Object talk = field(cls("com.lc.lcsdk.LCSDK_Talk"), "INSTANCE");
-            // String handleKey = <from play>;
-            // invoke(talk, "startTalkByHandleKey", new Class[]{String.class,String.class,String.class,String.class,String.class,
-            //         cls("com.lc.lcsdk.Data.LCTalkConfig"), String.class, cls("com.lc.common.talk.VideoSampleCfg")},
-            //         handleKey, SERIAL, "0", "0", "", null, "", null);
-            Log.i(TAG, "talk singleton=" + talk + " (wire play->handleKey to finish)");
+            Object r = invoke(talk, "startDHTalk",
+                new Class[]{String.class, int.class, boolean.class, boolean.class},
+                serial, 0, false, true);
+            Log.i(TAG, "startDHTalk -> " + r);
+            for (int i = 0; i < 6; i++) {
+                Thread.sleep(1500);
+                Log.i(TAG, "curStreamMode=" + safe(() -> invoke(talk, "getCurStreamMode", new Class[]{})) +
+                           " devState=" + tryDevState(login, serial));
+            }
         } catch (Throwable t) {
             Log.e(TAG, "runTalk error", t);
         }
+    }
+
+    String tryDevState(Object login, String serial) { try { return "" + invoke(login, "getDevState", new Class[]{String.class}, serial); } catch (Throwable t) { return "?"; } }
+    interface Sup { Object get() throws Throwable; }
+    static String safe(Sup s) { try { return "" + s.get(); } catch (Throwable t) { return "?"; } }
+    static String extract(String s, String a, String b) { int i = s.indexOf(a); if (i < 0) return ""; i += a.length(); int j = s.indexOf(b, i); return j < 0 ? "" : s.substring(i, j); }
+    String readAsset(String n) throws Exception {
+        java.io.InputStream in = getAssets().open(n);
+        byte[] buf = new byte[in.available()]; in.read(buf); in.close();
+        return new String(buf, "UTF-8");
     }
 
     // ---- tiny reflection helpers ----

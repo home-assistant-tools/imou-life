@@ -44,7 +44,14 @@ DevP2PInfo`). The `DevP2PSk` is what lets the `.so` compute DevAuth — no crack
 - ✅ **`LCSDK_Talk.INSTANCE`** obtained (needs `Looper.prepare()` on the worker thread —
   the SDK creates Handlers). The reuse-.so approach is proven: the standalone APK drives
   the Imou SDK with no Imou app.
-- ⏳ **open the play stream → handleKey**: `NativeShareLink` has no open method, so the
+- ✅ **NetSDK + P2P init**: `initLCNetSDK()=true`, `initP2PSeverAfterSDK()` OK, `addDevices()`
+  OK, **`devState=2` (device ONLINE)** — the imported session reaches the cloud.
+- ⛔ **BLOCKER: `getNetSDKHandler()` returns 0** (fast, not a 15s timeout) → P2P device-login
+  fails, so `startDHTalk` can't talk (`curStreamMode=-1`). Despite SDK init + NetSDK init +
+  P2P init + addDevices + online. Missing the **exact app startup init sequence** — most
+  likely `SetNetSDKLogin(callback)` and/or precise `init(...)` args. Capture it by setting
+  the Imou app's gadget `on_load:wait` and hooking `init`/`getNetSDKHandler` at startup.
+- ⏳ after the handle works: **play stream → handleKey**: `NativeShareLink` has no open method, so the
   stream must go through the play path. Build a `PlayerParam(...)` (≈25 fields: serial,
   user, pwd, encryptMode, PSK, sharedLinkMode, handleKey=`serial+"+"+channel`, the P2P
   URI from `Utils.buildOptionalP2PUri`, …) and call the native play (see
