@@ -35,14 +35,25 @@ Fill `DEVICE_JSON` / `SERIAL` in `MainActivity.java` from your captured
 `device_session.json` (`addDevices` payload: `Sn/User/Pwd/Port/DevP2PAk/DevP2PSk/
 DevP2PInfo`). The `DevP2PSk` is what lets the `.so` compute DevAuth — no cracking needed.
 
-## Status / TODO (on-device iteration)
-- ✅ build mechanics, lib/dex bundling, reflection init/addDevices.
-- ⏳ wire `playRealTimeStream(...)` exact args + obtain `handleKey`, then
-  `startTalkByHandleKey`. (The `LCSDK_PlayWindow` window/surface binding is the main
-  remaining piece.)
-- ⏳ confirm the embedded gadget hooks the in-process `libCommonSDK` and the TTS plays;
-  alternatively use `pushMediaData(audioType,…)` if it accepts audio.
-- ⚠️ the SDK may expect parts of the app's `Application.onCreate` init/Context; add as needed.
+## Status / TODO (VALIDATED on device — S21)
+- ✅ **build mechanics** (aapt2/d8/apksigner, no gradle) — `imou-tts.apk` builds/installs.
+- ✅ **native libs load**: `libc++_shared, libCommonLog, libnetsdk, libjninetsdk,
+  libconfigsdk, libCloudClient, libCommonSDK` (the dep chain is complete).
+- ✅ **`LCSDK_Login.init(easy4ipcloud:8800,…)`** runs (logcat "SDK init done").
+- ✅ **`addDevices(json)`** runs (logcat "addDevices done").
+- ✅ **`LCSDK_Talk.INSTANCE`** obtained (needs `Looper.prepare()` on the worker thread —
+  the SDK creates Handlers). The reuse-.so approach is proven: the standalone APK drives
+  the Imou SDK with no Imou app.
+- ⏳ **open the play stream → handleKey**: `NativeShareLink` has no open method, so the
+  stream must go through the play path. Build a `PlayerParam(...)` (≈25 fields: serial,
+  user, pwd, encryptMode, PSK, sharedLinkMode, handleKey=`serial+"+"+channel`, the P2P
+  URI from `Utils.buildOptionalP2PUri`, …) and call the native play (see
+  `LCSDK_MediaPlayWindow:1970`), bound to the hidden Surface. Then
+  `startTalkByHandleKey(handleKey, serial, "0", "0", "", null, "", null)`.
+- ⏳ **audio injection**: bundle `libgadget.so`+config (script mode → `assets/inject.js`,
+  the encoder hook @0x995240) so the in-process gadget feeds TTS; or test
+  `pushMediaData(audioType,…)`.
+- ⚠️ real `DEVICE_JSON` from `device_session.json` (DevP2PAk/DevP2PSk/DevP2PInfo).
 
-This is a working **skeleton**, not a finished binary — the RE recipe is complete; the
-remaining work is on-device wiring of play→handleKey + verifying in-process injection.
+**Milestone reached: the standalone APK runs the Imou SDK end-to-init.** Remaining =
+the play-stream (PlayerParam) wiring + the in-process TTS injection — iterative on-device.
