@@ -34,9 +34,12 @@ our voice. **Verified: the "Kiara-Phòng khách" camera spoke an injected TTS cl
   `Lavc60.31.102`), not G.711 — another reason PCM-level injection (codec-agnostic)
   beats injecting encoded frames.
 
-The pure-protocol path below (a standalone DHHTTP-media client over dh-p2p) is still
-documented for an app-free implementation, but the encoder-injection method above is
-the working solution today.
+The pure-protocol path below is now also working for the tested relay route:
+`scripts/imou_dhp2p.py` opens the P2P/PTCP realm in pure Python, and
+`scripts/imou_visualtalk.py` opens `visualtalk.xav`, starts talk, and sends
+interleaved DHAV audio frames. The encoder-injection method remains the quickest
+audible app-assisted path, while the pure Python route is the add-on/container
+candidate.
 
 ## App-free talk protocol (`visualtalk.xav` over the P2P realm) — captured
 
@@ -79,15 +82,18 @@ PLAY ...&talktype=talk&trackID=64&method=0 HTTP/1.1 ... Cseq: 3   -> 200 OK
 ```
 
 Notes / remaining unknowns for a standalone client:
-- **Transport:** `dh-p2p -p 127.0.0.1:<p>:8086 <SERIAL>` gives the realm pipe; the AEDA
-  HTTP server (port 8086 over the realm) serves `visualtalk.xav`. The P2P signaling
-  (`NFPOST /device/<SERIAL>/{local,p2p}-channel` with WSSE `P2PClient`/`LeChange...`)
-  is handled by dh-p2p, not by us.
-- **Auth (TODO RE):** Cseq 0 needs WSSE `Username="admin"` with `PasswordDigest` +
-  `LightweightDigest` derived from the camera password (admin) + a nonce/created. The
-  digest algorithm still needs reversing (standard WSSE is
-  `Base64(SHA1(nonce+created+pw))`; Dahua adds a LightweightDigest — verify offline
-  against a captured (nonce, created, digest) triple).
+- **Transport:** `scripts/imou_dhp2p.py <SERIAL> --relay --bind 127.0.0.1:<p>
+  --remote-port 8086` gives the realm pipe in pure Python. The older Rust
+  `dh-p2p -p 127.0.0.1:<p>:8086 --relay <SERIAL>` remains a useful comparison
+  implementation.
+- **Auth:** the cloud/P2P WSSE and device-auth helpers now have a pure-Python
+  implementation in [`scripts/imou_wsse.py`](../scripts/imou_wsse.py). Native
+  confirms `/dev/urandom` alphanumeric nonces for the SDK WSSE client, while the
+  public DHP2P path uses a decimal nonce and
+  `Base64(SHA1(nonce+created+"DHP2P:<user>:<key>"))`. Device-auth `Login to`
+  keying, HMAC-SHA256 `DevAuth`, PBKDF2-SHA256 and AES-256/OFB LocalAddr encryption
+  are also implemented. For `visualtalk.xav`, the tested digest is
+  `Base64(SHA1(nonce + created + MD5("user:<realm>:password").upper()))`.
 - **Encryption (TODO):** the app uses `encrypt=3` (DHEncrypt3) — the on-realm media
   payloads are encrypted (recv frames are high-entropy with no ADTS). For an app-free
   client either (a) try `encrypt=0` in the PLAY URL for a plaintext session, or
@@ -97,19 +103,21 @@ Notes / remaining unknowns for a standalone client:
 - **Frame format:** the 28-byte DHAV header (above), AAC payload @ 16 kHz, trackID=5
   on the wire (interleave channel `0x0a` = 2×5).
 
-Building this standalone client (dh-p2p realm + visualtalk state machine + WSSE auth +
-encryption handling) is the remaining work for an app-free TTS path. The
-encoder-injection method (top of file) already delivers working TTS today.
+The standalone client path is now proven through an audible TTS test:
+Cseq 0 and START TALK both returned `200 OK`, then AAC/ADTS DHAV frames on
+trackID=5 were sent through the pure Python relay tunnel and heard on the camera.
+The returned SDP for this camera marks trackID=5 as `sendonly`
+`MPEG4-GENERIC/16000`; G.711 frames complete the protocol but are silent here.
 
 ## Feasibility: REUSE `libCommonSDK.so` instead of reimplementing the crypto
 
-A from-scratch standalone client is blocked at **DevAuth** (the device-auth in the P2P
-`local-channel` rendezvous; `p2p-channel` 404s for account-bound devices). DevAuth is a
-Dahua-specific 32-byte SHA256 that did **not** yield to extensive offline brute-force
-(hundreds of hash/HMAC/encoding combinations) — it likely mixes a cloud-login-derived
-secret. The crypto is internal wolfSSL (no exported symbols; capstone *and* radare2
-fail to xref the SHA256/base64 tables at `0x28cadc`/`0x27d7c0`/`0x178594`). So
-reimplementing DevAuth needs Ghidra-level work and possibly the full cloud-login flow.
+A from-scratch standalone client used to look blocked at **DevAuth** (the
+device-auth in the P2P `local-channel` rendezvous; `p2p-channel` can 404 for
+account-bound devices). The older/public device-auth variant is now pure Python:
+`MD5("<user>:Login to <RandSalt>:<password>").upper()`, PBKDF2-SHA256,
+AES-256/OFB and HMAC-SHA256. The remaining native-heavy part is the newer
+account-issued P2P v2 material (`DevP2PAk`, `DevP2PSk`, `p2pSalt`) and exact key
+selection for models that reject the public/type-0 path.
 
 **The pragmatic feasible path is to not reimplement any of it — reuse the .so**, which
 already does DevAuth + P2P + visualtalk + DHEncrypt3 internally. Three flavors, easiest
@@ -158,10 +166,11 @@ portable strings (captured live):
    "extP2PInfo":[] }]
 ```
 
-This is why DevAuth resisted offline cracking with only the password — **DevAuth is
-derived from `DevP2PSk`** (an account-issued secret) + `p2pSalt` + nonce, not the
-device password. By importing `DevP2PAk`/`DevP2PSk`/`p2pSalt` (from the cloud device
-list / captured from the app), the .so computes DevAuth itself. Native handles
+This is why the newer SDK route can resist offline cracking with only the password:
+some devices appear to require `DevP2PSk` (an account-issued secret) + `p2pSalt` +
+nonce, not just the device password. By importing `DevP2PAk`/`DevP2PSk`/`p2pSalt`
+(from the cloud device list / captured from the app), the .so computes that route
+itself. Native handles
 (`handleKey`/`loginHandle`) are NOT importable (in-process pointers) — but these
 DeviceLoginParams ARE, and the .so opens its own P2P session from them.
 
@@ -215,6 +224,9 @@ returned mic audio would need `CDHEncrypt3`, but that is not required for TTS.)
 Decompiled from `LCDHAVAudioPacker::Pack` — the class's `vtable[2]`. Found via the
 Itanium RTTI: typeinfo-name string `N2LC7PlaySDK17LCDHAVAudioPackerE` → typeinfo
 struct → vtable (read through `R_AARCH64_RELATIVE` relocations) → `vtable[2]`.
+Pure-Python replacement: [`scripts/imou_dhav.py`](../scripts/imou_dhav.py) implements
+G.711 µ-law/A-law encode, DHAV audio packing, and DHHTTP interleaving; its checksum
+self-test is verified against the captured frame below.
 
 A talk audio frame = **28-byte header + raw audio payload + 8-byte trailer**
 (total length field = `payload_len + 0x24`, i.e. 28 + 8 = 36 overhead bytes):
@@ -229,7 +241,7 @@ A talk audio frame = **28-byte header + raw audio payload + 8-byte trailer**
 | 0x10 | 4 | timestamp (packed) | observed pattern `~0x69b7xxxx` |
 | 0x14 | 2 | tick | 16-bit |
 | 0x16 | 1 | `0x04` | constant |
-| 0x17 | 1 | checksum | `(Σ bytes[0x00..0x14] + 4) & 0xff` |
+| 0x17 | 1 | checksum | `(Σ bytes[0x00..0x16]) & 0xff`; equivalent to the earlier decompile note `(Σ bytes[0x00..0x15] + 4) & 0xff` |
 | 0x18 | 2 | `83 01` | audio-info tag (LE `0x0183`) |
 | 0x1A | 1 | `0x1a` | **constant** (NOT codec — same for AAC recv and G711 talk) |
 | 0x1B | 1 | sample-rate code | see table below |
