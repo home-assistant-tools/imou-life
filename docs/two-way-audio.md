@@ -150,9 +150,10 @@ secondary encrypt mode.
 
 ## Runtime / MITM Evidence
 
-- **No live talk session captured yet.** MITM HTTPS exports only contain
-  login/device-list/config calls; the talk-URL fetch and the binary talk media
-  (P2P/relay) are not in HTTP exports.
+- **Superseded note:** the first MITM pass did not capture a live talk session.
+  Later Frida/runtime work did capture the talk lifecycle and codec/session
+  parameters; see "Runtime Findings" below and
+  `docs/talk-protocol-reverse-engineering.md`.
 - **Loopback-proxy architecture confirmed**: native SDK opens a pool of
   `127.0.0.1:<port>` TCP listeners (e.g. `runtime-check/*-sockets*.txt`).
 - **Receive bridge works** (`scripts/imou_xav_bridge.py`): adb-forwards to a

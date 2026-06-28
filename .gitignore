@@ -4,6 +4,7 @@ artifacts/
 
 # Android packages and native binaries must not be pushed.
 *.apk
+*.idsig
 *.apks
 *.xapk
 *.so
@@ -18,6 +19,7 @@ out/
 *.class
 __pycache__/
 *.pyc
+imou_tts_inject.js
 
 # Local OS/editor noise.
 .DS_Store

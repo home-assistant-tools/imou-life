@@ -44,6 +44,9 @@ public class MainActivity extends Activity {
 
     static final String P2P_HOST = "www.easy4ipcloud.com";
     static final int    P2P_PORT = 8800;
+    // Cloud REST session. Put the token in staged assets/account.json, not in Git:
+    // {"cloudHost":"app-sg1-v3.easy4ipcloud.com:443","token":"..."}
+    static final String DEFAULT_CLOUD_HOST = "app-sg1-v3.easy4ipcloud.com:443";
 
     SurfaceView surface;
 
@@ -74,7 +77,8 @@ public class MainActivity extends Activity {
         // order matters: deps before libCommonSDK
         for (String lib : new String[]{
                 "c++_shared", "CommonLog", "netsdk", "jninetsdk", "CloudClient",
-                "CommonSDK", "gadget" /* Frida gadget: auto-runs assets/inject.js */ }) {
+                "CommonSDK", "HsviewClient" /* cloud REST native (PCS signing) */,
+                "gadget" /* Frida gadget: auto-runs assets/inject.js */ }) {
             try { System.loadLibrary(lib); Log.i(TAG, "loaded lib" + lib); }
             catch (Throwable t) { Log.w(TAG, "load lib" + lib + " failed: " + t); }
         }
@@ -86,6 +90,43 @@ public class MainActivity extends Activity {
             String serial = extract(deviceJson, "\"Sn\":\"", "\"");
             Log.i(TAG, "serial=" + serial);
 
+            // 1.5) ARouter init — the SDK talk path resolves the talk address via a REST service
+            //      looked up through ARouter; without init it throws "Invoke init(context) first".
+            try {
+                // ARouter launcher obfuscated to class P.a (UPPERCASE P!); P.a.d(Application)==ARouter.init.
+                cls("P.a").getMethod("d", android.app.Application.class).invoke(null, getApplication());
+                Log.i(TAG, "ARouter init done (P.a.d)");
+            } catch (Throwable t) { Log.w(TAG, "ARouter init: " + t); }
+
+            // 1.6) Cloud REST init (reuse login token) so asynGetTalkPlayAddress can fetch the talk ve.
+            //      Recipe from app y9.C0199b.a: setClientUaInfo(...) + RestApi.init(host,type,"uuid\\"+token,token)
+            try {
+                String accountJson = readAssetMaybe("account.json");
+                String acctToken = firstNonEmpty(System.getenv("IMOU_TOKEN"), extract(accountJson, "\"token\":\"", "\""));
+                String host = firstNonEmpty(System.getenv("IMOU_CLOUD_HOST"), extract(accountJson, "\"cloudHost\":\"", "\""), DEFAULT_CLOUD_HOST);
+                if (acctToken.length() == 0) {
+                    Log.w(TAG, "RestApi init skipped: missing IMOU_TOKEN or assets/account.json token");
+                } else {
+                    Object rest = call(cls("com.lc.lcsdk.LCSDK_RestApi"), null, "getInstance");
+                    try { cls("com.lc.lcsdk.LCSDK_Utils").getMethod("setEncryptIV", String.class).invoke(null, ""); } catch (Throwable t) {}
+                    // all client setters the app calls before init (a null one -> endsWith NPE)
+                    callByPrefix(rest, "setClientVersion", "V10.0.6");
+                    callByPrefix(rest, "setClientProject", "Base");
+                    callByPrefix(rest, "setClientPushId", "");
+                    try { invoke(rest, "setClientUaTTid", new Class[]{String.class}, "a9e6993cdd62410bb81a7d8f62211b1a"); } catch (Throwable t) {}
+                    Method ua = null;
+                    for (Method m : rest.getClass().getMethods())
+                        if (m.getName().startsWith("setClientUaInfo")) { ua = m; break; }
+                    if (ua != null) ua.invoke(rest, "phone", "V10.0.6", android.os.Build.VERSION.RELEASE,
+                        "Android", android.os.Build.BRAND, "bafd56c41d8df3d1", "easy4ipbaseapp", "Base", "vi_VN", "V9.7.2");
+                    int type = host.contains(":443") ? 1 : 0;
+                    invoke(rest, "init", new Class[]{String.class, int.class, String.class, String.class},
+                        host, type, "uuid\\" + acctToken, acctToken);
+                    Log.i(TAG, "RestApi init: host=" + host + " getHost=" +
+                        safe(() -> { Object ri = call(cls("com.lc.lcsdk.rest.RestApi"), null, "getInstance"); return invoke(ri, "getHost", new Class[]{}); }));
+                }
+            } catch (Throwable t) { Log.w(TAG, "RestApi init: " + t); }
+
             // 2) SDK + P2P init
             Object login = call(cls("com.lc.lcsdk.LCSDK_Login"), null, "getInstance");
             invoke(login, "init",
@@ -95,35 +136,119 @@ public class MainActivity extends Activity {
             Log.i(TAG, "SDK init done");
             Log.i(TAG, "initLCNetSDK=" + safe(() -> invoke(login, "initLCNetSDK", new Class[]{})));
             try {
-                invoke(login, "initP2PSeverAfterSDK",
-                    new Class[]{String.class, int.class, String.class, int.class, String.class, String.class, boolean.class},
-                    P2P_HOST, P2P_PORT, P2P_HOST, P2P_PORT, "/data/data/com.imoutts/files", "imoutts", false);
-                Log.i(TAG, "initP2PSeverAfterSDK ok");
-            } catch (Throwable t) { Log.w(TAG, "initP2PSeverAfterSDK: " + t); }
+                // Use the Ex form WITH the pss signaling server — required for P2P traversal.
+                // App (LCSDKHelper) calls: initP2PSeverAfterSDKEx(p2pHost, iPv4, iPv6, p2pPort,
+                //   pssHost, pssPort, "", "", isRelay). Without pss, getP2PPort never traverses.
+                Object ok = invoke(login, "initP2PSeverAfterSDKEx",
+                    new Class[]{String.class, String.class, String.class, int.class, String.class, int.class, String.class, String.class, boolean.class},
+                    "www-v2.easy4ipcloud.com", "47.84.202.34", "", 8800,
+                    "pss-sg.easy4ipcloud.com", 443, "", "", false);
+                Log.i(TAG, "initP2PSeverAfterSDKEx -> " + ok);
+            } catch (Throwable t) { Log.w(TAG, "initP2PSeverAfterSDKEx: " + t); }
+            // Tell the SDK the network is up so the proxy starts connecting (app does this on
+            // network events). Without it the proxy stays idle -> getP2PPort never traverses.
+            try { invoke(login, "notifyConnectionChange", new Class[]{}); Log.i(TAG, "notifyConnectionChange ok"); }
+            catch (Throwable t) { Log.w(TAG, "notifyConnectionChange: " + t); }
 
             // 3) import device session
             invoke(login, "addDevices", new Class[]{String.class}, deviceJson);
             Log.i(TAG, "addDevices done; devState=" + tryDevState(login, serial));
+            // kick the proxy to (re)connect all registered devices
+            try { Object rc = invoke(login, "reConnectAll", new Class[]{}); Log.i(TAG, "reConnectAll -> " + rc); }
+            catch (Throwable t) { Log.w(TAG, "reConnectAll: " + t); }
+            try { invoke(login, "notifyConnectionChange", new Class[]{}); } catch (Throwable t) {}
+            Thread.sleep(3000); // give the proxy time to traverse to the device
 
-            // 4) THE CRUX: getNetSDKHandler does the P2P device-login -> handle (talk needs this != 0)
-            //    Same json shape the SDK's startDHTalk uses (relies on the addDevices'd session).
-            String h = "{\"Sn\":\"" + serial + "\",\"Type\":0, \"Port\":0,\"User\":\"\",\"Pwd\":\"\",\"LoginType\":0}";
-            Object handle = invoke(login, "getNetSDKHandler",
-                new Class[]{String.class, int.class, boolean.class}, h, 15000, false);
-            // BLOCKER: returns 0 (fast, not a timeout) despite init+initLCNetSDK+initP2PSever+addDevices
-            // and devState=2 (online). Missing the exact app startup init — most likely
-            // SetNetSDKLogin(callback) and/or precise init() args. Capture via gadget on_load=wait.
-            Log.i(TAG, "getNetSDKHandler -> " + handle + "  (0 = P2P device-login FAILED)");
-
-            // 5) start talk via the high-level path (uses getNetSDKHandler internally)
-            Object talk = field(cls("com.lc.lcsdk.LCSDK_Talk"), "INSTANCE");
-            Object r = invoke(talk, "startDHTalk",
-                new Class[]{String.class, int.class, boolean.class, boolean.class},
-                serial, 0, false, true);
-            Log.i(TAG, "startDHTalk -> " + r);
+            // 3.1) THE REAL TALK CONNECT: tryNetSDKConnect (LCSDKHelper.h()).
+            //      Takes the DeviceLoginParams OBJECT (not array): Sn/User/Pwd/Port/DevP2PAk/
+            //      DevP2PSk/AK=""/SK=""/extP2PInfo[{dstPort:554}]. Does P2P traversal + NetSDK
+            //      login + returns handle, filling code[0]. This is what the app's talk path calls.
+            String devObj = deviceJson.trim();
+            if (devObj.startsWith("[")) devObj = devObj.substring(1, devObj.length() - 1).trim();
+            // ensure AK/SK present (app sets them ""), and add talk extP2PInfo(dstPort 554)
+            if (!devObj.contains("\"AK\"")) devObj = devObj.replaceFirst("\\{", "{\"AK\":\"\",\"SK\":\"\",");
             for (int i = 0; i < 6; i++) {
-                Thread.sleep(1500);
-                Log.i(TAG, "curStreamMode=" + safe(() -> invoke(talk, "getCurStreamMode", new Class[]{})) +
+                int[] codeOut = new int[]{0};
+                Object tnc = invoke(login, "tryNetSDKConnect",
+                    new Class[]{String.class, int.class, boolean.class, int[].class}, devObj, 10000, false, codeOut);
+                Log.i(TAG, "tryNetSDKConnect try" + i + " -> handle=" + tnc + " code[0]=" + codeOut[0] +
+                           " devState=" + tryDevState(login, serial));
+                if (tnc != null && ((Number) tnc).longValue() != 0) break;
+                Thread.sleep(2000);
+            }
+
+            // 3.5) THE MISSING STEP: open the P2P tunnel first (STUN/ICE hole-punch).
+            //      GetTalkP2PUrlTask.request() does exactly this before getNetSDKHandler:
+            //      getP2PPort("{Sn,Pid,Type:1,isTalk:true,...}", state[], 50, count[]) -> localPort.
+            String pid = extract(deviceJson, "\"devPid\":\"", "\"");
+            // EXACT working format (captured from app): timeout 5000 (NOT 50 — 50ms can't traverse!)
+            String p2pJson = "{\"Sn\":\"" + serial + "\",\"Type\":1,\"Port\":0,\"User\":\"\",\"Pwd\":\"\",\"Pid\":\"" + pid + "\"}";
+            int localPort = 0;
+            for (int i = 0; i < 8; i++) {
+                int[] state = new int[]{0};
+                int[] count = new int[]{0};
+                Object lp = invoke(login, "getP2PPort",
+                    new Class[]{String.class, int[].class, int.class, int[].class}, p2pJson, state, 5000, count);
+                localPort = ((Number) lp).intValue();
+                Log.i(TAG, "getP2PPort try" + i + " -> localPort=" + localPort +
+                           " p2pState=" + state[0] + " count=" + count[0]);
+                if (localPort > 0) break;
+                Thread.sleep(1000);
+            }
+            Log.i(TAG, "P2P tunnel localPort=" + localPort);
+            // If tunnel opened: set session (proxy at 127.0.0.1:localPort) like the app does
+            if (localPort > 0) {
+                try {
+                    invoke(login, "setSessionInfo",
+                        new Class[]{short.class, String.class, short.class, String.class, String.class},
+                        (short) 3, "127.0.0.1", (short) localPort, "visualtalk_reqid", serial);
+                    Log.i(TAG, "setSessionInfo(127.0.0.1:" + localPort + ") done");
+                } catch (Throwable t) { Log.w(TAG, "setSessionInfo: " + t); }
+            }
+
+            // 4) START TALK — self-contained DHHTTP talk (does its OWN getP2PPort + visualtalk
+            //    over the tunnel). Public entry LCSDK_Talk.startTalk(deviceSn, channelId, userName,
+            //    psw, subType, isEncrypt, PSK, forceMts, deviceType, talkType, sharedLinkMode, isOPT,
+            //    isAudioEncode, isTls, severParameter, wsseKey, isAssistInfo). isOPT=1 -> DHHTTP.
+            //    isAudioEncode=true -> the AAC encoder runs -> the frida gadget injects our TTS.
+            Class<?> talkCls = cls("com.lc.lcsdk.LCSDK_Talk");
+            Object talkObj = field(talkCls, "INSTANCE");
+            try { talkCls.getMethod("setRequestId", String.class).invoke(null, "visualtalk_reqid"); Log.i(TAG,"setRequestId ok"); }
+            catch (Throwable t) { Log.w(TAG, "setRequestId: " + t); }
+            String devUser = extract(deviceJson, "\"User\":\"", "\"");
+            String devPwd  = extract(deviceJson, "\"Pwd\":\"", "\"");
+            Method startTalk = null;
+            for (Method m : talkCls.getMethods())
+                if (m.getName().equals("startTalk") && m.getParameterTypes().length == 17) { startTalk = m; break; }
+            if (startTalk == null) {
+                Log.w(TAG, "startTalk overload with 17 params not found");
+                return;
+            }
+            Class<?> proxyT = startTalk.getParameterTypes()[14]; // ProxySeverParameter
+            // build a ProxySeverParameter with the cloud host (else asynGetTalkPlayAddress NPEs on null host)
+            String accountJson = readAssetMaybe("account.json");
+            String cloudHost = firstNonEmpty(System.getenv("IMOU_CLOUD_HOST"), extract(accountJson, "\"cloudHost\":\"", "\""), DEFAULT_CLOUD_HOST);
+            Object sever = proxyT.getConstructor().newInstance();
+            try { proxyT.getMethod("setHost", String.class).invoke(sever, cloudHost.replace(":443","")); } catch (Throwable t) {}
+            try { proxyT.getMethod("setProtocol", int.class).invoke(sever, 1); } catch (Throwable t) {}
+            try { proxyT.getMethod("setPort", int.class).invoke(sever, 443); } catch (Throwable t) {}
+            try { proxyT.getMethod("setKeepAlive", int.class).invoke(sever, 1); } catch (Throwable t) {}
+            Object tr = null;
+            for (int i = 0; i < 3; i++) {
+                tr = startTalk.invoke(talkObj,
+                    serial, 0, devUser, devPwd, 0, 3, "", false, "", "talk", 0, 1 /*isOPT=1 DHHTTP*/, true, false,
+                    sever, "", false);
+                Log.i(TAG, "startTalk try" + i + " -> " + tr +
+                           " curStreamMode=" + safe(() -> invoke(talkObj, "getCurStreamMode", new Class[]{})));
+                if ("0".equals(String.valueOf(tr))) break;
+                Thread.sleep(2500);
+            }
+            // HOLD the P2P tunnel open so it can be used (in-process or via adb-forward).
+            Log.i(TAG, "TUNNEL READY port=" + localPort + " serial=" + serial);
+            for (int i = 0; i < 90; i++) {
+                Thread.sleep(2000);
+                if (i % 5 == 0) Log.i(TAG, "tunnel hold port=" + localPort +
+                           " curStreamMode=" + safe(() -> invoke(talkObj, "getCurStreamMode", new Class[]{})) +
                            " devState=" + tryDevState(login, serial));
             }
         } catch (Throwable t) {
@@ -137,8 +262,22 @@ public class MainActivity extends Activity {
     static String extract(String s, String a, String b) { int i = s.indexOf(a); if (i < 0) return ""; i += a.length(); int j = s.indexOf(b, i); return j < 0 ? "" : s.substring(i, j); }
     String readAsset(String n) throws Exception {
         java.io.InputStream in = getAssets().open(n);
-        byte[] buf = new byte[in.available()]; in.read(buf); in.close();
-        return new String(buf, "UTF-8");
+        try {
+            java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
+            byte[] buf = new byte[8192];
+            int got;
+            while ((got = in.read(buf)) != -1) out.write(buf, 0, got);
+            return new String(out.toByteArray(), "UTF-8");
+        } finally {
+            in.close();
+        }
+    }
+    String readAssetMaybe(String n) {
+        try { return readAsset(n); } catch (Throwable t) { return ""; }
+    }
+    static String firstNonEmpty(String... values) {
+        for (String v : values) if (v != null && v.length() > 0) return v;
+        return "";
     }
 
     // ---- tiny reflection helpers ----
@@ -147,5 +286,11 @@ public class MainActivity extends Activity {
     static Object field(Class<?> c, String f) throws Exception { Field x = c.getField(f); return x.get(null); }
     static Object invoke(Object o, String m, Class<?>[] sig, Object... a) throws Exception {
         Method x = o.getClass().getMethod(m, sig); x.setAccessible(true); return x.invoke(o, a);
+    }
+    static void callByPrefix(Object o, String prefix, String arg) {
+        try { for (Method m : o.getClass().getMethods())
+            if (m.getName().startsWith(prefix) && m.getParameterTypes().length==1
+                && m.getParameterTypes()[0]==String.class) { m.invoke(o, arg); return; } }
+        catch (Throwable t) {}
     }
 }

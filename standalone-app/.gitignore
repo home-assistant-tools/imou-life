@@ -1,5 +1,6 @@
 out/
 *.apk
+*.idsig
 *.jks
 debug.jks
 stage/

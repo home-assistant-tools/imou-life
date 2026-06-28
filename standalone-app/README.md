@@ -21,19 +21,21 @@ for the full reverse-engineering and the recipe this implements.
 ## Build (no gradle — manual aapt2/d8/apksigner)
 ```bash
 ASDK=/opt/homebrew/share/android-commandlinetools \
-STAGE=<stage-dir> ./build.sh        # -> imou-tts.apk
+STAGE=/path/to/stage ./build.sh     # -> imou-tts.apk
 adb install -r imou-tts.apk
 ```
 Stage these into `$STAGE` (large/secret — NOT in git):
 - `dex/classes*.dex` — `unzip base.apk 'classes*.dex'` from the Imou APK.
 - `jniLibs/arm64-v8a/` — the `.so` deps above + `libgadget.so` + `libgadget.config.so`
   (config in `"script"` mode pointing at the asset).
-- `assets/inject.js` — encoder-hook + embedded TTS (see `scripts/imou_tts_inject.py`),
-  `assets/tts.pcm`.
+- `assets/inject.js` — encoder-hook + embedded TTS (see `scripts/imou_tts_inject.py`).
+- `assets/device.json` — the captured `addDevices` payload for the target camera.
+- `assets/account.json` — cloud REST session for talk-url fetch:
+  `{"cloudHost":"app-sg1-v3.easy4ipcloud.com:443","token":"..."}`.
 
-Fill `DEVICE_JSON` / `SERIAL` in `MainActivity.java` from your captured
-`device_session.json` (`addDevices` payload: `Sn/User/Pwd/Port/DevP2PAk/DevP2PSk/
-DevP2PInfo`). The `DevP2PSk` is what lets the `.so` compute DevAuth — no cracking needed.
+Do not put real serials, passwords, account tokens, `DevP2PAk`, or `DevP2PSk` in
+`MainActivity.java`. The placeholders in source are documentation only; runtime
+secrets come from staged assets.
 
 ## Status / TODO (VALIDATED on device — S21)
 - ✅ **build mechanics** (aapt2/d8/apksigner, no gradle) — `imou-tts.apk` builds/installs.
@@ -68,6 +70,9 @@ DevP2PInfo`). The `DevP2PSk` is what lets the `.so` compute DevAuth — no crack
   the encoder hook @0x995240) so the in-process gadget feeds TTS; or test
   `pushMediaData(audioType,…)`.
 - ⚠️ real `DEVICE_JSON` from `device_session.json` (DevP2PAk/DevP2PSk/DevP2PInfo).
+- ⚠️ current working tree experiments with ARouter/RestApi init, `getP2PPort`,
+  `tryNetSDKConnect`, and the 17-arg `LCSDK_Talk.startTalk(...)` path. It compiles,
+  but still needs on-device validation before treating the standalone APK as solved.
 
 **Milestone reached: the standalone APK runs the Imou SDK end-to-init.** Remaining =
 the play-stream (PlayerParam) wiring + the in-process TTS injection — iterative on-device.

@@ -13,13 +13,18 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 #   $STAGE/dex/        classes*.dex extracted from the Imou base.apk (SDK classes)
 #   $STAGE/jniLibs/arm64-v8a/   libCommonSDK.so + deps + libgadget.so + libgadget.config.so
 #   $STAGE/assets/inject.js     Frida-gadget script (encoder hook + TTS), assets/tts.pcm
-STAGE="${STAGE:-/private/tmp/claude-501/-Users-baduongvan-dev-smarthome-imou/daca6c13-3a76-4805-8635-fa5f5b868820/scratchpad/ttsapp}"
+STAGE="${STAGE:-}"
+if [ -z "$STAGE" ]; then
+    echo "error: set STAGE to the staged APK inputs directory" >&2
+    exit 2
+fi
 OUT="$HERE/out"; rm -rf "$OUT"; mkdir -p "$OUT"
 
 echo "[1] compile MainActivity.java"
 mkdir -p "$OUT/classes"
-javac -source 17 -target 17 -bootclasspath "$ANDROID_JAR" -classpath "$ANDROID_JAR" \
-    -d "$OUT/classes" "$HERE"/src/com/imoutts/*.java
+javac -source 11 -target 11 -classpath "$ANDROID_JAR" -nowarn \
+    -d "$OUT/classes" "$HERE"/src/com/imoutts/*.java 2>/dev/null || \
+javac --release 11 -classpath "$ANDROID_JAR" -d "$OUT/classes" "$HERE"/src/com/imoutts/*.java
 
 echo "[2] d8 my classes -> driver dex (highest classesN+1.dex slot)"
 "$D8" --min-api 24 --output "$OUT" "$OUT/classes"/com/imoutts/*.class
