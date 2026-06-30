@@ -1,0 +1,31 @@
+# Local reverse-engineering artifacts.
+# These include APKs, decompiled source, native libraries, and extracted assets.
+artifacts/
+
+# Android packages and native binaries must not be pushed.
+*.apk
+*.idsig
+*.apks
+*.xapk
+*.so
+*.dex
+*.odex
+*.vdex
+
+# Common decompiler outputs.
+jadx/
+apktool/
+out/
+*.class
+__pycache__/
+*.pyc
+imou_tts_inject.js
+
+# Local OS/editor noise.
+.DS_Store
+*.swp
+*.swo
+
+# Deploy configs with real credentials
+deploy/**/data/options.json
+deploy/**/.env

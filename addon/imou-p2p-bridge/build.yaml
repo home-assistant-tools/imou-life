@@ -1,0 +1,6 @@
+build_from:
+  amd64: ghcr.io/home-assistant/amd64-base:3.21
+  aarch64: ghcr.io/home-assistant/aarch64-base:3.21
+args:
+  DH_P2P_REF: 9bb723ee5d6a08e6d51c0be8781bb6d6c2b5db4c
+  GO2RTC_VERSION: 1.9.14

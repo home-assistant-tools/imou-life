@@ -1,0 +1,375 @@
+<!doctype html>
+<html>
+
+<head>
+    <meta charset="UTF-8">
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta name="renderer" content="webkit">
+    <meta name="viewport" id="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+    <title>Please complete the verification</title>
+    <style>
+        body {
+            margin: 0;
+        }
+
+        .title {
+            height: 18px;
+            margin: 15px;
+            font-size: 18px;
+            line-height: 18px;
+        }
+
+        #log {
+            display: none;
+            margin: 0;
+            word-break: break-all;
+        }
+
+        #log.log {
+            display: block;
+        }
+
+        #geelab_index_loading {
+            position: fixed;
+            top: 50%;
+            left: 50%;
+            overflow: hidden;
+            transform: translate(-50%, -50%);
+        }
+
+        #captcha {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            width: 260px;
+            height: 50px;
+            transform: translate(-50%, -50%);
+        }
+
+        /* loading */
+        .loader {
+            width: 40px;
+            height: 40px;
+        }
+
+        svg path,
+        svg rect {
+            fill: #3973ff;
+        }
+    </style>
+</head>
+
+<body>
+    <div id="log"></div>
+    <div id="captcha"></div>
+
+    <div id="geelab_index_loading">
+        <img class="geelab_index_img loader" id="geelab_img_loading" alt="Loading" style="display: none;">
+    </div>
+    <script>
+        var debug = false;
+        var logEle = document.getElementById('log');
+        var isOffline = false;
+        var indexVersion = '1.3.5'; // Index page version number, increment version on each file modification
+        function log(str) {
+            if (!debug) {
+                return;
+            }
+            var p = document.createElement('p');
+            p.appendChild(document.createTextNode(str));
+            logEle.insertBefore(p, logEle.firstChild);
+            // Also output error to console
+            console.log(str);
+        }
+        (function () {
+            // Error constructor function
+            function newError(msg, code, detail) {
+                return {
+                    desc: {
+                        indexVersion: indexVersion,
+                        detail: detail
+                    },
+                    msg: msg,
+                    code: code
+                }
+            }
+            function uploadExtraData(type, extraData) {
+                var self = window;
+                // Parameter should have length property, and parameter length cannot exceed limit
+                if (!extraData || (!extraData.length) || (extraData.length >= 1024 * 4)) {
+                    return;
+                }
+                if (!self.extraData) {
+                    self.extraData = {};
+                }
+                // Designed as an extensible structure to prevent future similar field addition requirements
+                self.extraData[type] = extraData;
+            }
+            var jsBridge = (function () {
+
+                var callbacks = {
+                    showBox: function () {
+                        captchaObj.showBox &&  captchaObj.showBox();
+                    },
+                    postNativeMessage: function (data) {
+                        log('getCore time: ' + ((new Date()).getTime()));
+                        uploadExtraData('GeeToken', data);
+                    }
+                };
+                var call = function (data) {
+                    // Call native method
+                    try {
+                        nativeCall(JSON.stringify(data))
+                    } catch (e) {
+                        log('Native interface call exception');
+                    }
+                };
+                // Adapt for HarmonyOS
+                var harmonys = JSON.parse(decodeURIComponent(location.href.split('?')[1].split('=')[1]));
+                var nativeCall = harmonys.harmony?  function (data) {
+                    if (window.webkit && window.webkit.messageHandlers) {
+                        return window.webkit.messageHandlers.gt4Notify.postMessage.bind(window.webkit.messageHandlers.gt4Notify)
+                    } else if (window.JSInterface) {
+                        // return JSInterface.gt4Notify.bind(JSInterface)
+                        JSInterface.call(data)
+                    } else {
+                        log('Please run in mobile environment')
+                    }
+                }: (function () {
+                    if (window.webkit && window.webkit.messageHandlers) {
+                        return window.webkit.messageHandlers.gt4Notify.postMessage.bind(window.webkit.messageHandlers.gt4Notify)
+                    } else if (window.JSInterface) {
+                        return JSInterface.gt4Notify.bind(JSInterface)
+                    } else {
+                        log('Please run in mobile environment')
+                    }
+                })();
+
+                return {
+                    callback: function (type, data) {
+                        return callbacks[type](data);
+                    },
+                    callNative: call
+                }
+            })();
+            // Expose jsBridge
+            window.jsBridge = jsBridge;
+            // jsBridge and global error catching should be loaded as early as possible to prevent errors in gt4 from not being caught
+            if (window.addEventListener) {
+                window.addEventListener('error', function (e) {
+                    jsBridge.callNative({
+                        type: 'error',
+                        data: newError("gt4-index error", 60302, e.message)
+                    });
+                })
+            } else {
+                window.onerror = function (e) {
+                    jsBridge.callNative({
+                        type: 'error',
+                        data: newError("gt4-index error", 60302, e.message)
+                    });
+                }
+            }
+        })();
+    </script>
+
+    <!-- Do not change this link position to prevent page errors above from not catching gt4 errors -->
+    <script src="./gl4.js"></script>
+
+    <script>
+        (function () {
+            // geeToken compatible with no token under ai
+            if (!isOffline) {
+                // Get mobile coreSDK data in non-offline mode
+                jsBridge.callNative({
+                    type: 'get'
+                })
+            }
+            var startTime = 0;
+            var clearID = 0;
+            var captcha = document.getElementById('captcha');
+            var loadingEle = document.getElementById('geelab_index_loading');
+            var img = document.getElementById('geelab_img_loading');
+
+            var query = location.href.split('?')[1];
+            // Compatible with Android 4.3 version style issues
+            var ua = navigator.userAgent.toLowerCase();
+            if(/Android/.test(window.navigator.userAgent) && /android\s([\w.]+)/.exec(ua)[1] <= 4.3) {
+                loadingEle.style.left = '45%';
+            }
+            
+            // Compatible with lower version Object.assign
+            if (typeof Object.assign != 'function') {
+                // Must be writable: true, enumerable: false, configurable: true
+                Object.defineProperty(Object, "assign", {
+                    value: function assign(target, varArgs) { // .length of function is 2
+                    if (target == null) { // TypeError if undefined or null
+                        throw new TypeError('Cannot convert undefined or null to object');
+                    }
+
+                    var to = Object(target);
+
+                    for (var index = 1; index < arguments.length; index++) {
+                        var nextSource = arguments[index];
+
+                        if (nextSource != null) { // Skip over if undefined or null
+                        for (var nextKey in nextSource) {
+                            // Avoid bugs when hasOwnProperty is shadowed
+                            if (Object.prototype.hasOwnProperty.call(nextSource, nextKey)) {
+                            to[nextKey] = nextSource[nextKey];
+                            }
+                        }
+                        }
+                    }
+                    return to;
+                    },
+                    writable: true,
+                    configurable: true
+                });
+            }
+            // Default configuration
+            var config = {
+                product: 'bind',
+                onError: function (e) {
+                    // Insert version number into error message
+                    e.desc = Object.assign({}, {desc: e.desc}, { indexVersion: indexVersion });
+                    jsBridge.callNative({
+                        type: 'error',
+                        data: e
+                    });
+                }
+            };
+            function setDebug() {
+                debug = true;
+                logEle.className = 'log';
+            }
+            
+            function paseURI() {
+                return JSON.parse(decodeURIComponent(query.split('=')[1]));
+            }
+
+            function checkArgs(args) {
+                // Set loading
+                if(args['loading']){
+                  img.src = args['loading'];
+                  clearID = setTimeout(function () {
+                    img.style.display = 'inline-block';
+                  }, 200);
+                }
+                // Whether to enable debug
+                if (args['debug']) {
+                    setDebug(true);
+                    startTime = (new Date()).getTime();
+                    log(JSON.stringify(args))
+                }
+
+                // Set title
+                if (args['title'] && args['title'] != "") {
+                    var h3 = document.createElement('h3');
+                    h3.className = 'title';
+                    h3.appendChild(document.createTextNode(decodeURIComponent(args['title'])));
+                    captcha.appendChild(h3);
+                }
+
+                // Check required parameters
+                if (!args['captchaId']) {
+                    log('args error: ' + query);
+                }
+
+                // Determine whether to add offline verification through useLocalOffline
+                if (args['useLocalOffline']) {
+                    // Enable own method for offline mode
+                    config.offlineCb = function () {
+
+                        isOffline = true;
+
+                        jsBridge.callNative({
+                            type: 'result',
+                            data: {
+                                captcha_id: args['captchaId'],
+                                challenge: args['challenge'],
+                                offline: true
+                            }
+                        });
+                    }
+                }
+            }
+
+            function mergeOptions(args) {
+                for (var k in args) {
+                    if (args.hasOwnProperty(k) &&
+                        ['debug', 'title',  args['type']].indexOf(k) === -1) {
+                        config[k] = args[k];
+                    }
+                }
+            }
+
+            if (!query) {
+                setDebug();
+                log('no query: ' + location.href);
+                return false;
+            }
+
+            // Parse parameters
+            var args = paseURI(query);
+
+            // Check parameters
+            checkArgs(args);
+
+            // Merge configuration options
+            mergeOptions(args);
+
+            // Initialize captcha
+            var handler = function (captchaObj) {
+                window.captchaObj = captchaObj;
+                captchaObj
+                    .appendTo(captcha)
+                    .onSuccess(function () {
+                        var result = captchaObj.getValidate();
+                        log('Success validate: ' + result);
+                        jsBridge.callNative({
+                            type: 'result',
+                            data: result
+                        });
+
+                    })
+                    .onReady(function () {
+                        log('load time: ' + ((new Date()).getTime() - (startTime || 0)));
+
+                        jsBridge.callNative({
+                            type: 'ready',
+                            data: {
+                                ready: 0
+                            }
+                        })
+
+                        clearTimeout(clearID);
+                        loadingEle.style.display = 'none';
+                    })
+                    .onClose(function () {
+                        jsBridge.callNative({
+                            type: 'close'
+                        });
+                    })
+                    .onError(function (e) {
+                        e.desc && (e.desc.indexVersion = indexVersion);
+                        jsBridge.callNative({
+                            type: 'error',
+                            data: e
+                        });
+                    })
+                    .onFail(function (e) {
+                        jsBridge.callNative({
+                            type: 'fail',
+                            data: e
+                        });
+                    })
+            };
+            window.initGeetest4(config, handler);
+
+        })();
+
+    </script>
+</body>
+
+</html>
