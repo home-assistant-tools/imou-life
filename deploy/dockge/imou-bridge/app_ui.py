@@ -37,6 +37,7 @@ GET_TOKEN_APIVER = os.environ.get("IMOU_GET_TOKEN_APIVER", APIVER)
 GEETEST4_APIVER = os.environ.get("IMOU_GEETEST4_APIVER", "152485")
 LOGIN_APIVER = os.environ.get("IMOU_LOGIN_APIVER", APIVER)
 OPTIONS_PATH = Path(os.environ.get("IMOU_BRIDGE_OPTIONS", "/data/options.json"))
+STATUS_PATH = Path(os.environ.get("IMOU_BRIDGE_STATUS", "/data/status.json"))
 LISTEN_HOST = os.environ.get("IMOU_UI_HOST", "0.0.0.0")
 LISTEN_PORT = int(os.environ.get("IMOU_UI_PORT", os.environ.get("INGRESS_PORT", "8099")))
 APP_DIR = Path(__file__).resolve().parent
@@ -312,7 +313,16 @@ def default_options() -> dict:
         "log_level": "info",
         "discovery_ui": True,
         "go2rtc": {"rtsp_port": 8554, "api_port": 1984, "webrtc_port": 8555},
-        "bridge": {"engine": "python", "python_bridge": "/opt/imou-p2p-bridge/imou_dhp2p.py", "restart_seconds": 5, "base_port": 8600, "verbose": False},
+        "bridge": {
+            "engine": "python",
+            "python_bridge": "/opt/imou-p2p-bridge/imou_dhp2p.py",
+            "restart_seconds": 5,
+            "base_port": 8600,
+            "verbose": False,
+            "warm_streams": True,
+            "warm_all_streams": False,
+            "warm_restart_seconds": 30,
+        },
         "accounts": [],
         "cameras": [],
     }
@@ -337,11 +347,48 @@ def save_options(options: dict) -> None:
     tmp.replace(OPTIONS_PATH)
 
 
+def load_status() -> dict:
+    try:
+        return json.loads(STATUS_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return {"cameras": {}}
+
+
+def camera_config_status(cam: dict, runtime: dict) -> dict:
+    is_lan = bool(cam.get("lan_detected") and cam.get("local_ip"))
+    enabled = bool(cam.get("enabled"))
+    relay = bool(cam.get("relay"))
+    password = str(cam.get("password") or "")
+    if enabled and not is_lan and not password:
+        return {
+            "state": "error",
+            "message": "Camera password is required before enabling remote P2P/relay streaming.",
+        }
+    if relay and not password:
+        return {
+            "state": "error",
+            "message": "Camera password is required before enabling relay.",
+        }
+    cameras = runtime.get("cameras") if isinstance(runtime, dict) else {}
+    cameras = cameras if isinstance(cameras, dict) else {}
+    for key in (cam.get("serial"), cam.get("bridge_name"), slugify(str(cam.get("bridge_name") or cam.get("device_name") or cam.get("serial") or ""))):
+        if key and isinstance(cameras.get(key), dict):
+            return cameras[key]
+    if enabled:
+        return {"state": "configured", "message": "Waiting for supervisor status."}
+    return {"state": "disabled", "message": "Bridge is off."}
+
+
 def public_options(options: dict) -> dict:
     out = deepcopy(options)
+    runtime = load_status()
     for account in out.get("accounts", []):
         password = account.pop("password", "")
         account["has_password"] = bool(password)
+        for cam in account.get("cameras", []):
+            cam["bridge_status"] = camera_config_status(cam, runtime)
+    for cam in out.get("cameras", []):
+        cam["bridge_status"] = camera_config_status(cam, runtime)
     return out
 
 
@@ -407,6 +454,8 @@ def normalize_device(item: dict) -> dict:
         "relay": False,
         "ptz": False,
         "talk": True,
+        "engine": "",
+        "warm": True,
     }
 
 
@@ -512,7 +561,7 @@ def build_account(email: str, label: str, login: dict, devices: dict, password: 
 
 def merge_account_refresh(existing: dict, refreshed: dict) -> dict:
     """Merge a fresh cloud camera list while preserving local bridge settings."""
-    keep = ("enabled", "bridge_name", "username", "password", "relay", "ptz", "talk")
+    keep = ("enabled", "bridge_name", "username", "password", "relay", "ptz", "talk", "engine", "warm")
     existing_by_serial = {cam.get("serial"): cam for cam in existing.get("cameras", []) if cam.get("serial")}
     merged_cameras = []
     for cam in refreshed.get("cameras", []):
@@ -576,6 +625,8 @@ def sync_managed_cameras(options: dict) -> None:
                     "relay": False if cam.get("lan_detected") else bool(cam.get("relay", False)),
                     "ptz": True,
                     "talk": True,
+                    "engine": str(cam.get("engine", "") or ""),
+                    "warm": bool(cam.get("warm", True)),
                     "managed_by_account": account.get("id"),
                     "source_device_name": cam.get("device_name", ""),
                     "source_family_name": cam.get("family_name", ""),
@@ -1034,7 +1085,7 @@ def api_update_account_password(account_id: str):
 @app.patch("/api/accounts/<account_id>/cameras/<serial>")
 def api_update_camera(account_id: str, serial: str):
     data = flask_request.get_json(force=True, silent=True) or {}
-    allowed = {"enabled", "bridge_name", "username", "password", "channel", "subtype", "streams", "relay", "ptz", "talk"}
+    allowed = {"enabled", "bridge_name", "username", "password", "channel", "subtype", "streams", "relay", "ptz", "talk", "engine", "warm"}
     with OPTIONS_LOCK:
         options = load_options()
         old_slug = current_managed_slug(options, account_id, serial)
@@ -1044,6 +1095,16 @@ def api_update_camera(account_id: str, serial: str):
             for cam in account.get("cameras", []):
                 if cam.get("serial") != serial:
                     continue
+                next_cam = deepcopy(cam)
+                for key, value in data.items():
+                    if key in allowed:
+                        next_cam[key] = value
+                is_lan = bool(next_cam.get("lan_detected") and next_cam.get("local_ip"))
+                password = str(next_cam.get("password") or "").strip()
+                if bool(next_cam.get("relay")) and not password:
+                    return error_response("Camera password is required before enabling relay")
+                if bool(next_cam.get("enabled")) and not is_lan and not password:
+                    return error_response("Camera password is required before enabling remote P2P bridge")
                 for key, value in data.items():
                     if key in allowed:
                         cam[key] = value
@@ -1279,6 +1340,14 @@ INDEX_HTML = r"""<!doctype html>
     .camera-stream-line { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 3px; }
     .channel-pill { display: inline-flex; align-items: center; gap: 4px; color: var(--muted); font-size: 11px; white-space: nowrap; }
     .channel-pill .line-icon { width: 13px; height: 13px; }
+    .status-pill { display: inline-flex; align-items: center; min-height: 20px; border-radius: 999px; padding: 2px 7px; font-size: 11px; font-weight: 700; border: 1px solid var(--line); color: var(--muted); background: var(--empty-bg); }
+    .status-pill.ready, .status-box.ready { color: var(--ok); border-color: rgba(6, 118, 71, .28); background: rgba(6, 118, 71, .08); }
+    .status-pill.starting, .status-pill.configured, .status-box.starting, .status-box.configured { color: var(--badge-ink); border-color: var(--badge-line); background: var(--badge-bg); }
+    .status-pill.restarting, .status-box.restarting { color: #b54708; border-color: #fedf89; background: #fffaeb; }
+    .status-pill.error, .status-box.error { color: var(--danger); border-color: var(--error-line); background: var(--error-bg); }
+    .status-box { display: grid; gap: 3px; border: 1px solid var(--line); border-radius: 7px; padding: 10px 12px; color: var(--muted); background: var(--empty-bg); }
+    .status-box strong { font-size: 12px; text-transform: uppercase; letter-spacing: .02em; }
+    .status-box span { font-size: 13px; line-height: 1.35; }
     .serial { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; color: var(--serial); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .badge { display: inline-flex; align-items: center; border: 1px solid var(--badge-line); background: var(--badge-bg); color: var(--badge-ink); padding: 2px 7px; border-radius: 999px; font-size: 12px; width: fit-content; }
     .switch { position: relative; width: 38px; height: 22px; display: inline-block; }
@@ -1290,6 +1359,7 @@ INDEX_HTML = r"""<!doctype html>
     .switch input:checked + .slider { background: var(--brand); }
     .switch input:checked + .slider:before { transform: translateX(16px); }
     .camera-enable > .switch input:checked + .slider:before { transform: translateX(18px); }
+    .switch input:disabled + .slider { cursor: not-allowed; opacity: .55; }
     .empty { padding: 28px; color: var(--muted); text-align: center; border: 1px dashed var(--line); border-radius: 8px; background: var(--empty-bg); }
     .modal-backdrop { position: fixed; inset: 0; background: var(--backdrop); display: grid; place-items: center; padding: 16px; z-index: 10; }
     .modal { width: min(560px, 100%); background: var(--panel); border-radius: 8px; box-shadow: 0 24px 80px rgba(0,0,0,.25); overflow: hidden; }
@@ -1413,6 +1483,26 @@ function enabledStreams(cam) {
 
 function enabledChannelCount(cam) {
   return new Set(enabledStreams(cam).map(s => Number(s.channel || 1))).size || 1;
+}
+
+function bridgeStatus(cam, draft, isLan) {
+  if (!!draft.enabled && !isLan && !String(draft.password || "").trim()) {
+    return {state: "error", message: "Camera password is required before enabling remote P2P/relay streaming."};
+  }
+  if (!!draft.relay && !String(draft.password || "").trim()) {
+    return {state: "error", message: "Camera password is required before enabling relay."};
+  }
+  return cam.bridge_status || {state: draft.enabled ? "configured" : "disabled", message: draft.enabled ? "Waiting for supervisor status." : "Bridge is off."};
+}
+
+function statusLabel(status) {
+  const state = status?.state || "unknown";
+  if (state === "ready") return "stream ready";
+  if (state === "starting") return "starting";
+  if (state === "restarting") return "reconnecting";
+  if (state === "error") return "error";
+  if (state === "disabled") return "off";
+  return state;
 }
 
 function streamSlug(baseSlug, stream, primary) {
@@ -1790,6 +1880,7 @@ function CameraRow({config, account, cam, onUpdate}) {
   const links = cameraLinks(config, cam, draft);
   const streamCount = enabledStreams(cam).length || 1;
   const channelCount = enabledChannelCount(cam);
+  const status = bridgeStatus(cam, draft, isLan);
   const showDetails = !!draft.enabled && detailsOpen;
   const toggleDetails = () => {
     if (draft.enabled) setDetailsOpen(true);
@@ -1813,6 +1904,7 @@ function CameraRow({config, account, cam, onUpdate}) {
       <div className="camera-stream-line">
         <span className="channel-pill"><LineIcon name="channel" />{channelCount} channel</span>
         <span className="channel-pill"><LineIcon name="stream" />{streamCount} stream</span>
+        <span className={`status-pill ${status.state || "unknown"}`} title={status.message || ""}>{statusLabel(status)}</span>
       </div>
     </div>
     <div className="camera-enable">
@@ -1845,6 +1937,8 @@ function CameraDetailModal({config, cam, draft, setDraft, dirty, saving, onSave,
   const isLan = !!(cam.lan_detected && cam.local_ip);
   const links = cameraLinks(config, cam, draft);
   const homeName = cam.family_name || cam.home_name || "";
+  const status = bridgeStatus(cam, draft, isLan);
+  const relayBlocked = !isLan && !String(draft.password || "").trim();
   return <div className="modal-backdrop" onClick={onClose}>
     <div className="modal camera-modal" onClick={e => e.stopPropagation()}>
       <div className="modal-head">
@@ -1871,8 +1965,12 @@ function CameraDetailModal({config, cam, draft, setDraft, dirty, saving, onSave,
           <EditField label="Camera user" value={draft.username} onChange={v => set("username", v)} />
           <EditField label="Camera password" type="text" value={draft.password} onChange={v => set("password", v)} />
         </div>
+        <div className={`status-box ${status.state || "unknown"}`}>
+          <strong>{statusLabel(status)}</strong>
+          <span>{status.message || ""}</span>
+        </div>
         {!isLan && <div className="camera-toggles">
-          <MiniSwitch icon="relay" label="Relay" checked={!!draft.relay} onChange={v => set("relay", v)} />
+          <MiniSwitch icon="relay" label="Relay" checked={!!draft.relay} disabled={relayBlocked} title={relayBlocked ? "Enter camera password before enabling relay" : ""} onChange={v => set("relay", v)} />
         </div>}
         <IntegrationLinks links={links} />
       </div>
@@ -1934,11 +2032,11 @@ function highlightYaml(value) {
   });
 }
 
-function MiniSwitch({icon = "link", label, checked, onChange}) {
+function MiniSwitch({icon = "link", label, checked, onChange, disabled = false, title = ""}) {
   return <div className="mini-toggle">
     <RowLabel icon={icon}>{label}</RowLabel>
-    <label className="switch">
-      <input type="checkbox" checked={checked} onChange={e => onChange(e.target.checked)} />
+    <label className="switch" title={title}>
+      <input type="checkbox" checked={checked} disabled={disabled} onChange={e => onChange(e.target.checked)} />
       <span className="slider"></span>
     </label>
   </div>;

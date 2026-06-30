@@ -45,6 +45,9 @@ options:
     restart_seconds: 5
     base_port: 8600
     verbose: false
+    warm_streams: true
+    warm_all_streams: false
+    warm_restart_seconds: 30
   accounts: []
   cameras:
     - name: yard
@@ -55,6 +58,8 @@ options:
       relay: false
       ptz: true
       talk: true
+      engine: ""
+      warm: true
 schema:
   log_level: list(trace|debug|info|warning|error)?
   discovery_ui: bool
@@ -72,6 +77,10 @@ schema:
     restart_seconds: int
     base_port: int
     verbose: bool
+    warm_streams: bool?
+    warm_all_streams: bool?
+    warm_restart_seconds: int?
+    ffmpeg: str?
   accounts: list?
   cameras:
     - name: str
@@ -83,4 +92,6 @@ schema:
       relay: bool?
       ptz: bool?
       talk: bool?
+      engine: str?
+      warm: bool?
       streams: list?

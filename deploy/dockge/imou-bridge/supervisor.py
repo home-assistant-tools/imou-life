@@ -16,6 +16,8 @@ import json
 import os
 import re
 import signal
+import shutil
+import socket
 import subprocess
 import threading
 import time
@@ -29,6 +31,7 @@ import dvrip
 OPTIONS_PATH = Path(os.environ.get("IMOU_BRIDGE_OPTIONS", "/data/options.json"))
 GO2RTC_CONFIG = Path(os.environ.get("IMOU_GO2RTC_CONFIG", "/data/go2rtc.yaml"))
 GO2RTC_BIN = os.environ.get("IMOU_GO2RTC_BIN", "/opt/go2rtc")
+STATUS_PATH = Path(os.environ.get("IMOU_BRIDGE_STATUS", "/data/status.json"))
 
 REDACTIONS = (
     (re.compile(r'(PasswordDigest=")[^"]+'), r"\1<redacted>"),
@@ -87,11 +90,14 @@ class Camera:
     relay: bool = False
     ptz: bool = False
     talk: bool = True
+    engine: str = ""
+    warm: bool = True
     streams: list[dict[str, Any]] = field(default_factory=list)
     tunnel_port: int = 0  # assigned for p2p cameras (stream, ->554)
     ptz_port: int = 0     # assigned for p2p ptz cameras (DVRIP, ->37777)
     onvif_port: int = 0   # assigned for ptz cameras (ONVIF shim for Frigate)
     dlna_port: int = 0    # assigned for talk media renderer
+    invalid_reason: str = ""
 
     def enabled_streams(self) -> list[dict[str, Any]]:
         streams = [s for s in self.streams if s.get("enabled", True)]
@@ -190,10 +196,14 @@ def parse_cameras(options: dict[str, Any], base_port: int) -> list[Camera]:
             serial=str(raw.get("serial", "")),
             host=str(raw.get("host", "")),
             relay=bool(raw.get("relay", False)),
-            ptz=True,
-            talk=True,
+            ptz=bool(raw.get("ptz", True)),
+            talk=bool(raw.get("talk", True)),
+            engine=str(raw.get("engine", "")).strip().lower(),
+            warm=bool(raw.get("warm", True)),
             streams=normalize_streams(raw),
         )
+        if mode == "p2p" and not cam.password:
+            cam.invalid_reason = "Camera password is required for remote P2P/relay streaming"
         if mode == "p2p":
             cam.tunnel_port = next_port
             next_port += 1
@@ -202,6 +212,48 @@ def parse_cameras(options: dict[str, Any], base_port: int) -> list[Camera]:
                 next_port += 1
         cams.append(cam)
     return cams
+
+
+class RuntimeStatus:
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self.lock = threading.Lock()
+        self.data: dict[str, Any] = {"cameras": {}}
+
+    def set_camera(self, cam: Camera, state: str, message: str = "") -> None:
+        payload = {
+            "state": state,
+            "message": message,
+            "updated_at": int(time.time()),
+            "name": cam.name,
+            "slug": cam.slug,
+            "serial": cam.serial,
+        }
+        with self.lock:
+            for key in {cam.name, cam.slug, cam.serial}:
+                if key:
+                    self.data.setdefault("cameras", {})[key] = payload
+            self._write_locked()
+
+    def _write_locked(self) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self.path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(self.data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        tmp.replace(self.path)
+
+
+def tunnel_failure_status(code: int | None, recent: list[str]) -> tuple[str, str]:
+    text = "\n".join(recent)
+    if "username/password are required" in text:
+        return "error", "Camera password is required for remote P2P/relay streaming"
+    if re.search(r"password|auth|login|credential|unauthori[sz]ed", text, re.IGNORECASE):
+        return "error", "Camera authentication failed; check the camera username/password"
+    if "DH response 404" in text or "404: Not Found" in text:
+        return "error", "P2P cloud cannot locate this device right now (404)"
+    if "TimeoutError" in text or "timed out" in text.lower():
+        return "error", "P2P tunnel timed out; check camera password, relay route, or camera network"
+    message = recent[-1] if recent else f"Tunnel exited with code {code}"
+    return "restarting", message
 
 
 def probe_ptz(cam: Camera, host: str, port: int) -> bool:
@@ -256,12 +308,79 @@ def write_go2rtc_config(cameras: list[Camera], go2rtc: dict[str, Any], log_level
     log(f"[go2rtc] wrote config with {len(cameras)} stream(s) -> {GO2RTC_CONFIG}")
 
 
+def rtsp_describe(host: str, port: int, stream: str, timeout: float = 8.0) -> tuple[bool, str]:
+    request = (
+        f"DESCRIBE rtsp://{host}:{port}/{stream} RTSP/1.0\r\n"
+        "CSeq: 1\r\n"
+        "Accept: application/sdp\r\n"
+        "User-Agent: imou-bridge-supervisor\r\n"
+        "\r\n"
+    ).encode("ascii")
+    try:
+        with socket.create_connection((host, port), timeout=timeout) as sock:
+            sock.settimeout(timeout)
+            sock.sendall(request)
+            chunks = []
+            while True:
+                chunk = sock.recv(4096)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                if b"\r\n\r\n" in b"".join(chunks):
+                    break
+    except OSError as exc:
+        return False, f"RTSP probe failed: {exc}"
+    response = b"".join(chunks).decode("utf-8", "replace")
+    first = response.splitlines()[0] if response else "empty RTSP response"
+    if re.search(r"RTSP/\d\.\d\s+200\b", first):
+        return True, f"RTSP stream ready: {stream}"
+    return False, first
+
+
+def start_stream_watchdog(stop: threading.Event, cameras: list[Camera], rtsp_port: int,
+                          status: RuntimeStatus, interval: int) -> threading.Thread | None:
+    if not cameras:
+        return None
+
+    def worker() -> None:
+        stop.wait(8)
+        while not stop.is_set():
+            for cam in cameras:
+                ok, message = rtsp_describe("127.0.0.1", rtsp_port, cam.slug)
+                if ok:
+                    status.set_camera(cam, "ready", message)
+                elif "404" in message:
+                    status.set_camera(cam, "error", "RTSP stream is not available yet; retrying automatically")
+                else:
+                    status.set_camera(cam, "restarting", f"{message}; retrying automatically")
+                if stop.wait(1):
+                    return
+            stop.wait(interval)
+
+    thread = threading.Thread(target=worker, name="stream-watchdog", daemon=True)
+    thread.start()
+    return thread
+
+
+def warm_stream_entries(cameras: list[Camera], *, all_streams: bool) -> list[tuple[Camera, str]]:
+    entries: list[tuple[Camera, str]] = []
+    for cam in cameras:
+        if not cam.warm:
+            continue
+        streams = cam.enabled_streams()
+        selected = streams if all_streams else streams[:1]
+        for index, stream in enumerate(selected):
+            entries.append((cam, cam.stream_slug(stream, primary=index == 0)))
+    return entries
+
+
 # ----------------------------- process workers -----------------------------
 class Proc(threading.Thread):
     """Generic restart-on-exit process runner with line logging."""
 
     def __init__(self, name: str, cmd: list[str], *, stop: threading.Event,
-                 restart_seconds: int, verbose: bool, on_line=None, env: dict | None = None) -> None:
+                 restart_seconds: int, verbose: bool, on_line=None, on_start=None,
+                 on_exit=None, env: dict | None = None) -> None:
         super().__init__(daemon=True)
         self.name = name
         self.cmd = cmd
@@ -269,6 +388,8 @@ class Proc(threading.Thread):
         self.restart_seconds = max(1, restart_seconds)
         self.verbose = verbose
         self.on_line = on_line
+        self.on_start = on_start
+        self.on_exit = on_exit
         self.env = env
         self.proc: subprocess.Popen[str] | None = None
 
@@ -281,6 +402,8 @@ class Proc(threading.Thread):
         while not self.stop.is_set():
             recent: list[str] = []
             log(f"[{self.name}] starting: {display_cmd(self.cmd)}")
+            if self.on_start:
+                self.on_start()
             self.proc = subprocess.Popen(self.cmd, stdout=subprocess.PIPE,
                                          stderr=subprocess.STDOUT, text=True, bufsize=1,
                                          env=run_env)
@@ -307,6 +430,8 @@ class Proc(threading.Thread):
             if code and not self.verbose and recent:
                 for line in recent:
                     log(f"[{self.name}] {line}")
+            if self.on_exit:
+                self.on_exit(code, recent)
             log(f"[{self.name}] exited ({code}); restart in {self.restart_seconds}s")
             self.stop.wait(self.restart_seconds)
 
@@ -323,11 +448,20 @@ def main() -> int:
     engine = str(bridge.get("engine", "python")).strip().lower()
     binary = str(bridge.get("binary", "/opt/dh-p2p/dh-p2p"))
     python_bridge = str(bridge.get("python_bridge", "/opt/imou-p2p-bridge/imou_dhp2p.py"))
+    warm_enabled = bool(bridge.get("warm_streams", True))
+    warm_all_streams = bool(bridge.get("warm_all_streams", False))
+    warm_restart_seconds = max(restart_seconds, int(bridge.get("warm_restart_seconds", 30)))
+    ffmpeg_bin = str(bridge.get("ffmpeg", os.environ.get("IMOU_FFMPEG_BIN", "ffmpeg")))
 
     cameras = parse_cameras(options, base_port)
-    if not cameras:
+    status = RuntimeStatus(STATUS_PATH)
+    for cam in cameras:
+        if cam.invalid_reason:
+            status.set_camera(cam, "error", cam.invalid_reason)
+    active_cameras = [cam for cam in cameras if not cam.invalid_reason]
+    if not active_cameras:
         log("[supervisor] no enabled cameras; starting UI with an empty go2rtc config")
-    write_go2rtc_config(cameras, go2rtc_opts, log_level)
+    write_go2rtc_config(active_cameras, go2rtc_opts, log_level)
 
     stop = threading.Event()
     workers: list[Proc] = []
@@ -341,12 +475,15 @@ def main() -> int:
     signal.signal(signal.SIGINT, handle_signal)
 
     def p2p_tunnel_cmd(cam: Camera, local_port: int, remote_port: int) -> tuple[list[str], dict[str, str] | None]:
-        if engine == "rust":
+        selected_engine = cam.engine or engine
+        if selected_engine == "rust":
             cmd = [binary, "-p", f"127.0.0.1:{local_port}:{remote_port}"]
             if cam.relay:
                 cmd.append("--relay")
+            if cam.username and cam.password:
+                cmd.extend(["--dtype", "1", "--username", cam.username])
             cmd.append(cam.serial)
-            return cmd, None
+            return cmd, {"IMOU_DHP2P_PASSWORD": cam.password} if cam.password else None
         cmd = [
             "python3",
             python_bridge,
@@ -365,7 +502,8 @@ def main() -> int:
         return cmd, {"IMOU_DHP2P_PASSWORD": cam.password}
 
     # DHP2P tunnels for p2p cameras
-    for cam in cameras:
+    tunnel_failures: dict[str, int] = {}
+    for cam in active_cameras:
         if cam.mode != "p2p":
             continue
         cmd, env = p2p_tunnel_cmd(cam, cam.tunnel_port, 554)
@@ -373,16 +511,38 @@ def main() -> int:
         def make_handler(c: Camera):
             def handler(line: str) -> None:
                 if "Ready to connect!" in line or "Pure Python DHP2P tunnel listening" in line:
+                    tunnel_failures[c.slug] = 0
+                    status.set_camera(c, "ready", f"Tunnel ready on 127.0.0.1:{c.tunnel_port}")
                     log(f"[{c.name}] tunnel ready on 127.0.0.1:{c.tunnel_port}")
             return handler
 
+        def make_start_handler(c: Camera):
+            def handler() -> None:
+                failures = tunnel_failures.get(c.slug, 0)
+                if failures:
+                    status.set_camera(c, "restarting", f"Retrying P2P tunnel after {failures} failure(s)")
+                else:
+                    status.set_camera(c, "starting", "Starting P2P tunnel")
+            return handler
+
+        def make_exit_handler(c: Camera):
+            def handler(code: int | None, recent: list[str]) -> None:
+                tunnel_failures[c.slug] = tunnel_failures.get(c.slug, 0) + 1
+                state, message = tunnel_failure_status(code, recent)
+                if state == "error":
+                    message = f"{message}; retrying automatically"
+                status.set_camera(c, state, message)
+            return handler
+
         w = Proc(f"tunnel:{cam.name}", cmd, stop=stop, restart_seconds=restart_seconds,
-                 verbose=verbose, on_line=make_handler(cam), env=env)
+                 verbose=verbose, on_line=make_handler(cam),
+                 on_start=make_start_handler(cam),
+                 on_exit=make_exit_handler(cam), env=env)
         w.start()
         workers.append(w)
 
     # extra DHP2P tunnels to :37777 for PTZ (DVRIP) on p2p PTZ cameras
-    for cam in cameras:
+    for cam in active_cameras:
         if cam.mode == "p2p" and cam.ptz and cam.ptz_port:
             cmd, env = p2p_tunnel_cmd(cam, cam.ptz_port, 37777)
             w = Proc(f"ptz-tunnel:{cam.name}", cmd, stop=stop,
@@ -395,6 +555,47 @@ def main() -> int:
                   stop=stop, restart_seconds=restart_seconds, verbose=True)
     go2rtc.start()
     workers.append(go2rtc)
+    stream_watchdog = start_stream_watchdog(stop, active_cameras, rtsp_port, status, restart_seconds)
+
+    if warm_enabled:
+        resolved_ffmpeg = shutil.which(ffmpeg_bin) or (ffmpeg_bin if Path(ffmpeg_bin).exists() else "")
+        if not resolved_ffmpeg:
+            log(f"[warm] ffmpeg not found ({ffmpeg_bin}); stream warming disabled")
+        else:
+            for cam, stream_name in warm_stream_entries(active_cameras, all_streams=warm_all_streams):
+                url = f"rtsp://127.0.0.1:{rtsp_port}/{stream_name}"
+                cmd = [
+                    resolved_ffmpeg,
+                    "-hide_banner",
+                    "-nostdin",
+                    "-rtsp_transport",
+                    "tcp",
+                    "-i",
+                    url,
+                    "-map",
+                    "0",
+                    "-c",
+                    "copy",
+                    "-f",
+                    "null",
+                    "-",
+                ]
+
+                def make_warm_line_handler(c: Camera, name: str):
+                    ready = {"seen": False}
+
+                    def handler(line: str) -> None:
+                        if not ready["seen"] and re.search(r"Stream mapping:|Output #0", line):
+                            ready["seen"] = True
+                            status.set_camera(c, "ready", f"RTSP stream warm: {name}")
+                    return handler
+
+                w = Proc(f"warm:{stream_name}", cmd, stop=stop,
+                         restart_seconds=warm_restart_seconds, verbose=verbose,
+                         on_line=make_warm_line_handler(cam, stream_name))
+                w.start()
+                workers.append(w)
+                log(f"[warm:{stream_name}] keeping rtsp://127.0.0.1:{rtsp_port}/{stream_name} active")
 
     # account/camera management web UI (Home Assistant ingress -> "Open Web UI")
     if bool(options.get("discovery_ui", True)):
@@ -407,14 +608,14 @@ def main() -> int:
         workers.append(site)
         log(f"[app-ui] account/camera manager on ingress port {site_port}")
 
-    for cam in cameras:
+    for cam in active_cameras:
         log(f"[{cam.name}] restream: rtsp://<addon-host>:{rtsp_port}/{cam.slug}")
 
     adv = str(options.get("advertised_host", "<nas>"))
     dlna_base = int(options.get("dlna_base_port", 8800))
 
     renderers = []
-    for i, c in enumerate(cameras):
+    for i, c in enumerate(active_cameras):
         if not c.talk:
             continue
         c.dlna_port = dlna_base + i
@@ -441,7 +642,7 @@ def main() -> int:
 
     # PTZ DVRIP endpoints (LAN direct :37777 or p2p tunnel) for ONVIF shim
     ptz_eps = {}
-    for c in cameras:
+    for c in active_cameras:
         if not c.ptz:
             continue
         if c.mode == "lan":
@@ -460,7 +661,7 @@ def main() -> int:
 
     # ONVIF PTZ shim per PTZ camera -> Frigate can drive PTZ via onvif
     onvif_base = int(options.get("onvif_base_port", 8700))
-    for i, c in enumerate(cameras):
+    for i, c in enumerate(active_cameras):
         has_ptz = c.ptz and c.slug in ptz_eps
         h, p, u, pw = ptz_eps[c.slug] if has_ptz else ("", 0, c.username, c.password)
         oport = onvif_base + i
@@ -483,6 +684,8 @@ def main() -> int:
         stop.wait(2)
     for w in workers:
         w.join(timeout=10)
+    if stream_watchdog:
+        stream_watchdog.join(timeout=5)
     return 0
 
 

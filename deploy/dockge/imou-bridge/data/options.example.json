@@ -3,7 +3,7 @@
   "discovery_ui": true,
   "go2rtc": { "rtsp_port": 8554, "api_port": 1984, "webrtc_port": 8555 },
   "dlna_base_port": 8800,
-  "bridge": { "engine": "python", "python_bridge": "/opt/imou-p2p-bridge/imou_dhp2p.py", "restart_seconds": 5, "base_port": 8600, "verbose": false },
+  "bridge": { "engine": "python", "python_bridge": "/opt/imou-p2p-bridge/imou_dhp2p.py", "restart_seconds": 5, "base_port": 8600, "verbose": false, "warm_streams": true, "warm_all_streams": false, "warm_restart_seconds": 30 },
   "accounts": [],
   "cameras": [
     { "name": "remote camera", "mode": "p2p", "serial": "EXAMPLESERIAL01", "username": "admin", "password": "CHANGEME", "relay": false },
