@@ -8,6 +8,34 @@ Assistant.
 For a generic Docker walkthrough, see
 [`docs/docker-deployment.md`](../../../docs/docker-deployment.md).
 
+## Responsibility And Credentials
+
+Use this stack only with cameras, accounts, and networks you own or are
+authorized to administer. The UI can import cameras from an Imou account, which
+requires the Imou account password, and enabled cameras require their local
+device/RTSP username and password for stream, relay, talk, and TTS features.
+
+You are responsible for legal compliance, privacy obligations, Imou/Dahua
+account/device terms, and keeping credentials safe. Treat `data/options.json`,
+Docker volumes, backups, logs, and generated configs as sensitive. Do not publish
+real account emails, passwords, tokens, serials, P2P keys, RTSP URLs containing
+credentials, captures, or APK/vendor artifacts.
+
+Pros:
+
+- Avoids router port forwarding for remote P2P cameras.
+- Avoids direct public exposure of camera RTSP ports.
+- Gives Frigate/Home Assistant/VLC normal local RTSP/WebRTC/ONVIF endpoints.
+- Can warm streams to reduce startup delay.
+
+Cons:
+
+- Remote P2P still relies on Imou cloud reachability and behavior.
+- User-provided Imou and camera credentials are required.
+- API/protocol changes can break the bridge.
+- Codec, PTZ, talkback, and stream support differs by model.
+- This stack is unofficial interoperability software.
+
 ## Layout
 
 ```

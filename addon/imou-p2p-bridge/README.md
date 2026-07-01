@@ -11,6 +11,37 @@ The add-on runs:
 - one ONVIF endpoint per enabled camera,
 - one DLNA MediaRenderer per talk-enabled camera for Home Assistant TTS/media.
 
+## Responsibility And Credentials
+
+This add-on is for cameras and Imou accounts you own or are authorized to
+administer. It requires user-supplied credentials: the Imou account password for
+account import/refresh, and each camera's device/RTSP password for stream, relay,
+talk, and TTS features.
+
+You are responsible for how you use it, including legal compliance, Imou/Dahua
+account/device terms, privacy obligations, and credential handling. The add-on
+does not send credentials to this GitHub repository or to the maintainers, but
+your local `options.json`, Home Assistant secrets, backups, and logs should be
+treated as sensitive.
+
+Do not publish real account emails, passwords, access tokens, camera serials,
+P2P keys, credential-bearing RTSP URLs, captures, or APK/vendor artifacts.
+
+Pros:
+
+- No router port forwarding for remote P2P cameras.
+- No direct RTSP exposure from the camera to the public Internet.
+- Local RTSP/WebRTC/ONVIF/DLNA endpoints for Home Assistant, Frigate, and VLC.
+- Stream warming can reduce live-view startup delay.
+
+Cons:
+
+- Remote P2P still depends on Imou cloud availability and protocol behavior.
+- Valid Imou and camera credentials are required.
+- Cloud/API changes can break the bridge.
+- Camera codecs, PTZ, talkback, and stream profiles vary by model.
+- This is not an official Imou/Dahua integration.
+
 ## Install From GitHub
 
 This repository is a Home Assistant add-on repository.

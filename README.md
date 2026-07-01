@@ -9,6 +9,52 @@ The app is designed to run as an add-on style container. It keeps camera video
 local to your network consumers while reaching remote Imou cameras through the
 same cloud P2P relay path the mobile app uses.
 
+## Important Responsibility Notice
+
+This project requires credentials that only the device owner or an authorized
+administrator should have:
+
+- an Imou account login when you use the account import UI,
+- each camera's local device/RTSP username and password for streaming, talk, and
+  relay features.
+
+Use this repository only with cameras, accounts, networks, and cloud services
+you own or are explicitly allowed to administer. You are responsible for
+complying with local law, the Imou/Dahua terms that apply to your account and
+devices, and any privacy rules for people who may be recorded. The maintainers
+do not operate your bridge, do not receive your credentials, and cannot take
+responsibility for how you deploy it.
+
+Store `options.json`, Home Assistant secrets, Docker volumes, backups, and logs
+as sensitive data. Do not publish real account emails, passwords, access tokens,
+device serials, P2P keys, RTSP URLs with credentials, packet captures, or APK
+artifacts.
+
+## Pros And Cons
+
+Pros:
+
+- No router port forwarding is required for remote P2P cameras.
+- Cameras do not need to expose their RTSP port directly to the Internet.
+- Frigate, Home Assistant, VLC, and local NVR software consume ordinary local
+  RTSP/WebRTC endpoints.
+- The bridge can warm streams so live view starts faster.
+- Local LAN cameras can stay on direct LAN RTSP when available.
+- The UI can show status for missing credentials, unavailable streams, and
+  retrying connections.
+
+Cons and risks:
+
+- Remote P2P access still depends on Imou cloud control/relay availability.
+- You must provide valid Imou account credentials and camera device passwords.
+- Cloud/API behavior can change without notice and may break the bridge.
+- This is interoperability/research software, not an official Imou product.
+- Two-way talk, codecs, PTZ, and multi-stream profiles can vary by camera model.
+- Misconfigured credentials, logs, backups, or public repos can leak sensitive
+  camera access data.
+- Realtime quality depends on camera firmware, network path, relay path, CPU,
+  codec support, and Frigate/go2rtc player behavior.
+
 ## What It Does
 
 - Restreams Imou/Dahua cameras through go2rtc for Frigate and Home Assistant.
